@@ -1,0 +1,12 @@
+name = "DQ"
+uuid = "34e1d756-a2d2-41bf-935d-bf52cf30291e"
+version = "0.1.0"
+authors = ["Laurin Maier "]
+
+[deps]
+Revise = "295af30f-e4ad-537b-8983-00126c2a3abe"
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[compat]
+Revise = "3.13.2"
+Test = "1.11.0"
