@@ -49,3 +49,6 @@ nunit-*.xml
 
 #binarry data files
 *.arrow
+# Recorded sensor data and build output
+data/
+docs/cave_lidar.pdf
