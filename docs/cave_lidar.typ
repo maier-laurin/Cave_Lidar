@@ -100,7 +100,75 @@ A light barrier detects the passage of a flag on the lidar shaft once per revolu
 
 == Electronics
 
-#todo[Teensy 4.0, MKS SERVO42C driver, BNO085 IMUs, wiring and pin table, power supply, battery.]
+#todo[Teensy 4.1, MKS SERVO42C driver, BNO085 IMU, power supply, battery.]
+
+== Rig wiring
+
+#todo[Wiring diagram.]
+
+The Teensy (3.3 V logic, not 5 V tolerant) is powered over USB only. Never connect it to the 12 V supply and never apply 5 V to any of its pins. Teensy GND and the 12 V supply GND must be connected.
+
+=== Stepper driver (MKS SERVO42C)
+
+Closed-loop driver on the back of a NEMA 17 stepper (ZT-42HS3922-1503, 1.8°, about 1.5 A). The motor coils (A+, A−, B+, B−) connect to the driver through its 4-pin connector.
+
+#table(
+  columns: (auto, auto, auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*Driver pin*], [*Label*], [*Connect to*], [*Notes*],
+  [V+], [VIN], [12 V supply +], [12–24 V allowed],
+  [Gnd], [GND], [12 V supply − and Teensy GND], [Common ground required],
+  [Com], [VCC], [not connected], [Reads about 3 V floating. If steps are missed, connect to Teensy 3.3 V],
+  [En], [EN], [Teensy pin 4], [Ignored while menu `En = Hold`],
+  [Stp], [CLK], [Teensy pin 2], [Step pulses],
+  [Dir], [DIR], [Teensy pin 3], [HIGH/LOW selects direction],
+)
+
+=== IMU (BNO085, I2C)
+
+Adafruit BNO085, mounted rigidly on the frame next to the motor mount, so it measures the frame pose. I2C address `0x4A` (`0x4B` if the address jumper is bridged). BT, P0, P1, DI, CS and 3Vo stay unconnected.
+
+#table(
+  columns: (auto, auto, auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*BNO085 pin*], [*STEMMA QT wire*], [*Teensy*], [*Notes*],
+  [VIN], [red], [3.3 V], [Board has its own regulator],
+  [GND], [black], [GND], [],
+  [SDA], [blue], [pin 18 (SDA0)], [`Wire`, 400 kHz],
+  [SCL], [yellow], [pin 19 (SCL0)], [],
+  [RST], [grey], [pin 17], [Hardware reset, used by the library],
+  [INT], [purple], [pin 16], [Wired but unused, never driven],
+)
+
+*Known issue:* after uploading a new sketch the BNO085 sends no data (even though `begin_I2C` succeeds) until the USB cable is unplugged and replugged. A cold start works. The reset pin is verified working, so the cause is the BNO state after an upload. Workaround: replug USB after each upload.
+
+=== Light barrier (index sensor)
+
+One pulse per lidar-shaft revolution, used for homing and the index edge.
+
+#table(
+  columns: (auto, auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*Wire*], [*Teensy*], [*Notes*],
+  [red (power)], [3.3 V], [Not 5 V: the Teensy input is not 5 V tolerant],
+  [black (GND)], [GND], [],
+  [green (signal)], [pin 5], [`INPUT_PULLUP`, interrupt on the falling edge (output goes LOW at the index)],
+)
+
+=== Velodyne VLP-16 GPS simulation
+
+The Teensy imitates a GPS receiver so the VLP-16 timestamps share one clock with the IMU. Simulated time starts at 2000-01-01 00:00:00 UTC at Teensy boot.
+
+#table(
+  columns: (auto, auto, auto, auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*Signal*], [*Jumper*], [*Velodyne GPS pin*], [*Teensy 4.1*], [*Notes*],
+  [PPS], [green], [1], [pin 10], [3.3 V, 10 ms pulse every second, rising edge = top of the second],
+  [GND], [white], [3], [GND], [],
+  [NMEA], [yellow], [4], [pin 1 (TX1, `Serial1`)], [`$GPRMC` at 9600 baud 8N1, sent 100 ms after each PPS edge],
+)
+
+`Serial1` is a hardware UART separate from the USB port, so programming and the PC data stream are not affected.
 
 = Control software
 
