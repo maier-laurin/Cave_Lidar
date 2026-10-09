@@ -1,0 +1,9 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/LidarCapture.Cli/LidarCapture.Cli.csproj" />
+    <Project Path="src/LidarCapture/LidarCapture.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/LidarCapture.Tests/LidarCapture.Tests.csproj" />
+  </Folder>
+</Solution>

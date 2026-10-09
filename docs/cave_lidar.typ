@@ -37,7 +37,27 @@ A mobile rotating lidar rig for mapping caves. A spinning lidar is rotated about
 
 Velodyne HDL lidar on a 3D-printed mount, rotated about the horizontal shaft axis.
 
-#todo[Exact lidar model, mass, power supply, interface.]
+#todo[Exact lidar model, mass, power supply.]
+
+=== Network
+
+The lidar is connected over Ethernet and streams its data as UDP packets. Its IP address was changed to `192.168.3.201`, so that it sits on its own subnet, separate from the home network (`192.168.1.x`). The PC reaches it through a second, dedicated Ethernet adapter, while the first adapter stays on the home network.
+
+#table(
+  columns: (auto, 1fr),
+  align: (left, left),
+  stroke: 0.5pt + gray,
+  [*Item*], [*Value*],
+  [Lidar IP], [`192.168.3.201`],
+  [Lidar subnet], [`192.168.3.0/24` (mask `255.255.255.0`)],
+  [Home network (first adapter)], [`192.168.1.0/24` (mask `255.255.255.0`)],
+  [Lidar gateway], [`192.168.3.1` (not used)],
+  [Capture PC (second adapter)], [`192.168.3.100/24`, no gateway],
+  [Destination (host) address on the lidar], [`255.255.255.255` (broadcast on the lidar subnet)],
+  [Data port (UDP)], [3201],
+  [Telemetry port (UDP)], [8308],
+)
+The lidar settings can be read at `http://192.168.3.201/cgi/settings.json` (web interface at `http://192.168.3.201`). On the Windows PC, inbound UDP 3201 must be allowed in the firewall for the capture program, otherwise the packets are dropped silently.
 
 == Rotation mechanism
 
@@ -450,6 +470,59 @@ The payload is plain text, at most 119 characters, without terminator. These are
 - *No safety supervision.* There is no end-stop, current monitoring or watchdog. If the PC program stops, the shaft keeps turning at the last speed.
 - *Stream before homing.* A start is delayed until the first index edge has been seen, but the data stream and PPS start immediately. The flag bit 0 of `flags` shows whether `axis_steps` can be used.
 
+= Capture software
+
+The capture software is written in C\# (.NET 10) in `capture/`. It consists of a lidar module (`LidarRecorder`, library `LidarCapture`), a small console program for testing it on its own, and later an orchestrator that also records the Teensy stream. The orchestrator asks for a project name and creates `<root>/<project name>/scan_NN/`. Each new start of the recording goes into a new `scan_NN` folder, so that a pause (e.g. to cross an obstacle) separates the data.
+
+== Lidar recorder
+
+The recorder listens on UDP port 3201 for the data packets (1206 bytes) of the VLP-16 and accepts only packets from the lidar's IP. A listening thread only receives and queues packets (16 MB socket buffer, queue of 20000 packets). A second thread parses them and writes the files, so that a slow disk does not lose packets. Only the strongest-return mode of the VLP-16 is supported; other packets are counted and discarded.
+
+=== File format
+
+The data are written as Apache Arrow IPC stream files `lidar_0001.arrow`, `lidar_0002.arrow`, ... with a new file every 60 s. Each batch of about 0.5 s is flushed to disk, so a crash loses at most that batch. Points are stored in the sensor frame in spherical coordinates, 14 bytes per point, about 4 MB/s at 300 000 points per second. Points without a return (distance 0) are not stored.
+
+#table(
+  columns: (auto, auto, 1fr),
+  align: (left, left, left),
+  stroke: 0.5pt + gray,
+  [*Column*], [*Type*], [*Meaning*],
+  [`time`], [timestamp, ns, UTC], [Absolute time of the firing, nanoseconds since 1970, interpolated per point.],
+  [`azimuth`], [uint16], [Head angle in $0.01 degree$, interpolated per point (0 to 35999).],
+  [`elevation`], [int8], [Laser angle in degrees ($-15$ to $15$), replaces the ring number.],
+  [`distance`], [uint16], [Distance in units of 2 mm.],
+  [`reflectivity`], [uint8], [Raw reflectivity, 0 to 255.],
+)
+
+Every file carries its description as schema metadata: format version, sensor, return mode, lidar IP and port, the time label and the time source (below), the units of all columns, software version, creation time of the file, the chunk number and extra entries given by the orchestrator (project, rpm, firmware version).
+
+=== Time
+
+The lidar reports its packet time in microseconds since the top of the hour. Its sub-second phase is locked to the PPS pulses of the rig, so a second always starts exactly at a pulse. The whole seconds are not those of the rig: the lidar does not take the hour, minute and second from the NMEA sentence (its `status.json` shows an empty `position`), and instead counts from its own start-up. The recorder therefore combines two sources:
+
+- the *sub-second part* from the lidar, which is exact and on the same clock as the IMU and step counter of the Teensy;
+- the *whole seconds* from a rough reference clock, which only has to be correct to within $plus.minus 0.5 "s"$.
+
+The rough reference is the time label of the first PPS pulse plus a stopwatch that was started when the `C` command was sent (the first pulse follows one second later). This does not depend on the PC clock being right. The recorder compares the reference with the lidar time for the first 50 packets, takes the median and rounds the difference to whole seconds. This integer offset stays fixed for the whole scan and is written to the file metadata (`time_offset_s`), together with the deviation of the reference from the lidar phase (`time_reference_error_ms`). On the real rig this deviation was 1 to 2 ms, so the margin to the 500 ms limit is large. A warning is logged if it exceeds 300 ms.
+
+The recorder continues the time across the change of the hour, and adds the offset of every block, firing sequence and laser inside the packet (110.592 µs per block, 55.296 µs per sequence, 2.304 µs per laser). The azimuth of the second sequence of a block is interpolated from the next block.
+
+The lidar needs about 3 s after the start of the PPS pulses to lock onto them, and the time jumps by a fraction of a second at that moment. The recording therefore has to start after the lock; the console program waits 8 s after the `C` command, which is before the shaft starts to turn (10 s). If the lidar clock jumps by more than 100 ms during a recording, this is logged.
+
+#todo[Make the lidar accept the NMEA sentence (position field stays empty, cause not yet found); then the whole seconds would come from the lidar itself.]
+
+=== Monitoring
+
+The recorder counts the packets received, those dropped because the queue was full, those rejected (wrong mode), and the packets missing according to small jumps (up to 100 ms) in the lidar timestamps. These numbers are printed every 2 s by the console program.
+
+=== Test on the real rig
+
+A 30 s recording at 6 rpm (lidar at 600 rpm) gave 5.6 million points in a single 75 MB file, which is 2.5 MB/s or 13.4 bytes per point. No packet was lost, the queue never held more than one packet, and the times were continuous and correct to the PC clock. The points show a regular gap of 20 to 40 ms every 100 ms, which is the sector of each lidar revolution in which the beam hits the rig frame.
+
+The console program has two helper commands: `inspect <folder>` prints a summary of the files of a scan (rows, time range, gaps, distance range, azimuth coverage, metadata), and `sniff <port>` shows the packets on the lidar's telemetry port.
+
+#todo[Orchestrator and Teensy recorder, long recording and disk write times on the Raspberry Pi.]
+
 = Reconstruction and viewing software
 
 This part of the software is being rewritten and is not documented yet.
@@ -466,4 +539,5 @@ This part of the software is being rewritten and is not documented yet.
   [*Date*], [*Change*],
   [2026-10-04], [Index sensor, step calibration (10:1) and vertical offset (93°) measured.],
   [2026-10-08], [Repository restructured. Wiring and control software chapters written for the final firmware `lidar_ctrl`.],
+  [2026-10-09], [Lidar IP changed to 192.168.3.201 (separate /24 subnet, second Ethernet adapter on the PC). Lidar recorder written (Arrow stream files), tested on the rig. Lidar time: sub-second from the PPS-locked lidar, whole seconds from a rough reference.],
 )
