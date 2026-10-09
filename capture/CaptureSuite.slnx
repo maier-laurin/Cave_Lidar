@@ -1,7 +1,10 @@
 <Solution>
   <Folder Name="/src/">
+    <Project Path="src/CaptureCore/CaptureCore.csproj" />
+    <Project Path="src/CaveScan/CaveScan.csproj" />
     <Project Path="src/LidarCapture.Cli/LidarCapture.Cli.csproj" />
     <Project Path="src/LidarCapture/LidarCapture.csproj" />
+    <Project Path="src/TeensyCapture/TeensyCapture.csproj" />
   </Folder>
   <Folder Name="/tests/">
     <Project Path="tests/LidarCapture.Tests/LidarCapture.Tests.csproj" />

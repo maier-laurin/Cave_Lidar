@@ -61,7 +61,8 @@ public sealed class LidarClock
     /// <summary>Lidar time as continuous nanoseconds, counting the wraps over the hour.</summary>
     private long Unwrap(uint micros)
     {
-        if (_started && micros + HalfHourMicros < _lastMicros) _wraps++;
+        // long arithmetic: micros + 1.8e9 does not fit into 32 bits once the lidar is more than 41 minutes into the hour
+        if (_started && (long)micros + HalfHourMicros < _lastMicros) _wraps++;
         _started = true;
         _lastMicros = micros;
         return _wraps * NsPerHour + micros * 1000L;

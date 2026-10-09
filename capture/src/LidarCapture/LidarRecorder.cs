@@ -51,6 +51,13 @@ public sealed class LidarStats
     public int QueueDepth { get; internal set; }
     public int ChunkIndex { get; internal set; }
 
+    /// <summary>
+    /// Latest check of the lidar time against the reference clock (reference minus lidar), in ms. It should stay at a few
+    /// ms; when it nears +-500 ms the whole seconds of the lidar clock would be wrong.
+    /// </summary>
+    public double ReferenceErrorMs { get; internal set; }
+    public int ClockJumps { get; internal set; }
+
     internal void AddReceived() => Interlocked.Increment(ref _received);
     internal void AddQueueDropped() => Interlocked.Increment(ref _queueDropped);
     internal void AddRejected() => Interlocked.Increment(ref _rejected);
@@ -181,7 +188,8 @@ public sealed class LidarRecorder : IAsyncDisposable
         ChunkedArrowWriter? writer = null;
         int packetsInBatch = 0;
         uint lastMicros = 0;
-        bool haveLast = false, warnedMode = false;
+        bool haveLast = false, warnedMode = false, warnedDrift = false;
+        int checkCounter = 0;
 
         void Flush()
         {
@@ -214,11 +222,24 @@ public sealed class LidarRecorder : IAsyncDisposable
                 }
                 else if (Math.Abs(gap) > 100_000 && Math.Abs(gap) < 1_800_000_000)
                 {
+                    Stats.ClockJumps++;
                     _o.Log?.Invoke($"Lidar clock jumped by {gap / 1000.0:F1} ms. Recording should start after the lidar has locked onto the PPS.");
                 }
             }
             lastMicros = micros;
             haveLast = true;
+
+            // keep checking the whole-second offset against the reference (about every 0.7 s), it must never drift away
+            if (++checkCounter >= 500)
+            {
+                checkCounter = 0;
+                double err = (reference() - startNs) / 1e6;
+                Stats.ReferenceErrorMs = err;
+                bool bad = Math.Abs(err) > 300;
+                if (bad && !warnedDrift)
+                    _o.Log?.Invoke($"WARNING: lidar time and reference clock differ by {err:F0} ms, the whole seconds of the lidar clock may be wrong (limit 500 ms).");
+                warnedDrift = bad;
+            }
 
             Vlp16Parser.Parse(p, startNs, batch);
             if (++packetsInBatch >= _o.BatchPackets)
@@ -231,6 +252,7 @@ public sealed class LidarRecorder : IAsyncDisposable
         void Calibrate()
         {
             clock.Calibrate(samples);
+            Stats.ReferenceErrorMs = clock.ReferenceErrorMs;
             writer = new ChunkedArrowWriter(_o.ScanDirectory, _o.ChunkSeconds, BuildMetadata(clock));
             _o.Log?.Invoke($"Lidar clock offset {clock.OffsetSeconds} s, reference clock off by {clock.ReferenceErrorMs:F1} ms");
             if (Math.Abs(clock.ReferenceErrorMs) > 300)

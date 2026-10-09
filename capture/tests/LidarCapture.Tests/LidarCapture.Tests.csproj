@@ -20,6 +20,9 @@
 
   <ItemGroup>
     <ProjectReference Include="..\..\src\LidarCapture\LidarCapture.csproj" />
+    <ProjectReference Include="..\..\src\CaptureCore\CaptureCore.csproj" />
+    <ProjectReference Include="..\..\src\TeensyCapture\TeensyCapture.csproj" />
+    <ProjectReference Include="..\..\src\CaveScan\CaveScan.csproj" />
   </ItemGroup>
 
 </Project>

@@ -99,6 +99,19 @@ public class ParserTests
     }
 
     [Fact]
+    public void LateInTheHourIsNotMistakenForAWrap()
+    {
+        // 2.5e9 us is past the point where micros + 1.8e9 overflows 32 bits
+        uint start = 2_600_000_000;
+        long trueNs = N * 1_000_000_000L + start * 1000L;
+        var clock = new LidarClock();
+        clock.Calibrate(new[] { (start, trueNs) });
+
+        for (int i = 0; i < 1000; i++)
+            Assert.Equal(trueNs + i * 1_327_000L, clock.ToUnixNs(start + (uint)(i * 1327)));
+    }
+
+    [Fact]
     public void CalibrationSamplesMayStraddleTheHourChange()
     {
         uint a = 3_599_999_000, b = 1000;

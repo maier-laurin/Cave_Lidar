@@ -10,4 +10,8 @@
     <PackageReference Include="Apache.Arrow" Version="22.1.0" />
   </ItemGroup>
 
+  <ItemGroup>
+    <ProjectReference Include="..\CaptureCore\CaptureCore.csproj" />
+  </ItemGroup>
+
 </Project>

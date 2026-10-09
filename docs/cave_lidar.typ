@@ -472,7 +472,7 @@ The payload is plain text, at most 119 characters, without terminator. These are
 
 = Capture software
 
-The capture software is written in C\# (.NET 10) in `capture/`. It consists of a lidar module (`LidarRecorder`, library `LidarCapture`), a small console program for testing it on its own, and later an orchestrator that also records the Teensy stream. The orchestrator asks for a project name and creates `<root>/<project name>/scan_NN/`. Each new start of the recording goes into a new `scan_NN` folder, so that a pause (e.g. to cross an obstacle) separates the data.
+The capture software is written in C\# (.NET 10) in `capture/`. It consists of a lidar module (`LidarRecorder`, library `LidarCapture`), a rig module (`TeensyLink`, `TeensyRecording`, library `TeensyCapture`) for the Teensy stream, a small console program for testing the lidar module on its own, and the orchestrator `CaveScan` that runs both. The orchestrator asks for a project name and creates `<root>/<project name>/scan_NN/`. Each new start of the recording goes into a new `scan_NN` folder, so that a pause (e.g. to cross an obstacle) separates the data.
 
 == Lidar recorder
 
@@ -503,9 +503,11 @@ The lidar reports its packet time in microseconds since the top of the hour. Its
 - the *sub-second part* from the lidar, which is exact and on the same clock as the IMU and step counter of the Teensy;
 - the *whole seconds* from a rough reference clock, which only has to be correct to within $plus.minus 0.5 "s"$.
 
-The rough reference is the time label of the first PPS pulse plus a stopwatch that was started when the `C` command was sent (the first pulse follows one second later). This does not depend on the PC clock being right. The recorder compares the reference with the lidar time for the first 50 packets, takes the median and rounds the difference to whole seconds. This integer offset stays fixed for the whole scan and is written to the file metadata (`time_offset_s`), together with the deviation of the reference from the lidar phase (`time_reference_error_ms`). On the real rig this deviation was 1 to 2 ms, so the margin to the 500 ms limit is large. A warning is logged if it exceeds 300 ms.
+The rough reference is supplied by the caller. In the orchestrator it is the time of the most recent Teensy sample plus the time since that sample arrived, which is the same clock the lidar is locked to, so it never drifts and is off only by the USB latency (a few ms). The stand-alone console program has no Teensy stream and uses the time label plus a stopwatch that was started when the `C` command was sent (the first pulse follows one second later), or the PC clock. None of these depends on the PC clock being right. The recorder compares the reference with the lidar time for the first 50 packets, takes the median and rounds the difference to whole seconds. This integer offset stays fixed for the whole scan and is written to the file metadata (`time_offset_s`), together with the deviation of the reference from the lidar phase (`time_reference_error_ms`). On the real rig this deviation was 1 to 3 ms, so the margin to the 500 ms limit is large.
 
-The recorder continues the time across the change of the hour, and adds the offset of every block, firing sequence and laser inside the packet (110.592 µs per block, 55.296 µs per sequence, 2.304 µs per laser). The azimuth of the second sequence of a block is interpolated from the next block.
+The offset is *not* recalibrated during a scan, because lidar and rig share one PPS and cannot drift apart. Instead the recorder keeps checking: about every 0.7 s it compares the reference with the lidar time again and shows the result live (`time check`). A warning is logged if it exceeds 300 ms. A stopwatch on the PC would be a poor reference for this check, because its crystal drifts by tens of ppm against the Teensy (0.1 to 0.2 s per hour), which is why the orchestrator uses the Teensy clock.
+
+The recorder continues the time across the change of the hour, and adds the offset of every block, firing sequence and laser inside the packet (110.592 µs per block, 55.296 µs per sequence, 2.304 µs per laser). The azimuth of the second sequence of a block is interpolated from the next block. The lidar counts its microseconds from its own start-up, so it can be anywhere in the hour; the wrap detection must work for all values (a first version overflowed 32 bits above 2.49 billion µs, found by the live time check and covered by a test now).
 
 The lidar needs about 3 s after the start of the PPS pulses to lock onto them, and the time jumps by a fraction of a second at that moment. The recording therefore has to start after the lock; the console program waits 8 s after the `C` command, which is before the shaft starts to turn (10 s). If the lidar clock jumps by more than 100 ms during a recording, this is logged.
 
@@ -521,7 +523,48 @@ A 30 s recording at 6 rpm (lidar at 600 rpm) gave 5.6 million points in a single
 
 The console program has two helper commands: `inspect <folder>` prints a summary of the files of a scan (rows, time range, gaps, distance range, azimuth coverage, metadata), and `sniff <port>` shows the packets on the lidar's telemetry port.
 
-#todo[Orchestrator and Teensy recorder, long recording and disk write times on the Raspberry Pi.]
+== Rig recorder
+
+`TeensyLink` keeps the serial port open and decodes the binary stream (packet format in @sec:usb). Packets with a wrong CRC are dropped, and impossible type and length combinations are rejected at once, so a stray marker byte does not stall the decoder. The firmware only streams after a `C` command; between scans only text messages arrive. While a scan is running, a `TeensyRecording` saves the stream into the scan folder:
+
+- `rig_0001.arrow`, ... : one row per sample (100 per second): `time` (absolute, ns), `axis_steps`, quaternion, `q_acc`, `cal`, linear acceleration, magnetic field, `flags`, `drops`.
+- `edges_0001.arrow`, ... : one row per index edge: `time`, `steps_before_reset`.
+- `rig_messages.log`: all text messages and headers with the PC time of arrival.
+
+The files are Arrow IPC streams like the lidar files, with a new file every 60 s and the description in the schema metadata (column meanings, units, steps per revolution, rpm, label of the first pulse). The times are on the simulated UTC of the rig, which is also the time scale of the lidar data, so the two can be joined directly. A queue decouples the serial reader from the disk. About 0.36 MB are written per minute.
+
+== Orchestrator `CaveScan`
+
+The orchestrator is a command line program with a live display:
+
+```
+CaveScan --root <folder> [--project <name>] [--teensy COM4] [--rpm 6] [--lidar-ip 192.168.3.201]
+         [--port 3201] [--chunk-seconds 60] [--lock-wait 8] [--auto <seconds>]
+```
+
+It asks for a project name (if not given with `--project`) and uses it exactly as typed as folder name `<root>/<project name>/`. Names that are not legal folder names (empty, leading or trailing space, trailing dot, `\ / : * ? " < > |`, reserved Windows names) are refused. A project may already exist; each scan gets the next free folder `scan_01`, `scan_02`, ... so the parts of one project stay separate, for instance before and after an obstacle.
+
+Keys: `s` starts a scan, `x` stops it (a second `x` ends the recording at once), `q` quits when no scan is running. `Ctrl+C` closes the scan and stops the rig. Because the firmware keeps the shaft turning if the PC disappears, the program always sends the stop command when it ends.
+
+*Sequence of a scan:*
+
++ A new folder `scan_NN` is created, and the rig recording starts.
++ `C,<rpm>,<label>` is sent to the rig (label = PC time plus one second) and the program waits for the answer `Config ok`. A rig that does not answer, or that is still turning, aborts the start.
++ The program waits at least 8 s (lock wait) and until the lidar's status page (`/cgi/status.json`) reports `Locked` for the PPS. The lidar needs about 3 s to lock and its time jumps then. The shaft starts to turn after 10 s.
++ The lidar recording starts, with the Teensy clock as time reference.
++ On stop the rig runs down to 0° (about 10 to 20 s) while both recordings continue, then the lidar and rig recordings are closed and `scan.json` is written.
+
+*Live display:* state and elapsed time; for the rig the sample rate, USB drops, CRC errors, index edges, shaft state and angle, IMU quaternion with accuracy and calibration, and the last message; for the lidar the status page (PPS, motor, laser), packets and points per second, lost and dropped packets, clock jumps, the time check against the rig clock and the current file; free disk space with the remaining recording time at the current data rate; and the last messages.
+
+*Files of a scan folder:* `lidar_NNNN.arrow`, `rig_NNNN.arrow`, `edges_NNNN.arrow`, `rig_messages.log`, `orchestrator.log` (all events) and `scan.json` (project, scan, start and end time, rpm, label, software version, and the final counters of lidar and rig).
+
+With `--auto <seconds>` a scan runs unattended for that time and the program then exits, without display and keys.
+
+=== Test of a complete scan
+
+An unattended scan of 30 s plus the run-down (total 51 s, `--auto 30`) recorded 8.1 million lidar points (108 MB) and 5000 rig samples. No lidar packet was lost, no packet was dropped by the Teensy, there were no CRC errors, and the time check stayed between 1.6 and 3 ms.
+
+#todo[Long recording and disk write times on the Raspberry Pi with the USB SSD; pause and resume across several scans.]
 
 = Reconstruction and viewing software
 
@@ -539,5 +582,5 @@ This part of the software is being rewritten and is not documented yet.
   [*Date*], [*Change*],
   [2026-10-04], [Index sensor, step calibration (10:1) and vertical offset (93°) measured.],
   [2026-10-08], [Repository restructured. Wiring and control software chapters written for the final firmware `lidar_ctrl`.],
-  [2026-10-09], [Lidar IP changed to 192.168.3.201 (separate /24 subnet, second Ethernet adapter on the PC). Lidar recorder written (Arrow stream files), tested on the rig. Lidar time: sub-second from the PPS-locked lidar, whole seconds from a rough reference.],
+  [2026-10-09], [Lidar IP changed to 192.168.3.201 (separate /24 subnet, second Ethernet adapter on the PC). Lidar recorder written (Arrow stream files), tested on the rig. Lidar time: sub-second from the PPS-locked lidar, whole seconds from a rough reference. Teensy recorder and orchestrator CaveScan (CLI with live display) written and tested on the rig.],
 )

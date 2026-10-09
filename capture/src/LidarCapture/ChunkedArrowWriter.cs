@@ -1,84 +1,40 @@
-using System.Diagnostics;
-using System.Runtime.InteropServices;
 using Apache.Arrow;
-using Apache.Arrow.Ipc;
 using Apache.Arrow.Types;
+using CaptureCore;
 
 namespace LidarCapture;
 
-/// <summary>
-/// Writes point batches as Arrow IPC streams into lidar_0001.arrow, lidar_0002.arrow, ... and starts a new file
-/// after <c>chunkSeconds</c>. Every batch is flushed to disk, so a crash loses at most the batch in flight.
-/// </summary>
+/// <summary>Writes lidar point batches as chunked Arrow stream files lidar_0001.arrow, lidar_0002.arrow, ...</summary>
 internal sealed class ChunkedArrowWriter : IDisposable
 {
-    private readonly string _directory;
-    private readonly double _chunkSeconds;
-    private readonly IReadOnlyDictionary<string, string> _metadata;
-    private readonly Stopwatch _age = new();
+    private static readonly TimestampType TimeType = new(TimeUnit.Nanosecond, "UTC");
 
-    private FileStream? _file;
-    private ArrowStreamWriter? _writer;
-    private Schema? _schema;
-    private long _closedBytes;
+    private readonly ChunkedStreamWriter _writer;
 
-    public int ChunkIndex { get; private set; }
-    public long BytesWritten => _closedBytes + (_file?.Length ?? 0);
+    public int ChunkIndex => _writer.ChunkIndex;
+    public long BytesWritten => _writer.BytesWritten;
 
-    public ChunkedArrowWriter(string directory, double chunkSeconds, IReadOnlyDictionary<string, string> metadata)
-    {
-        _directory = directory;
-        _chunkSeconds = chunkSeconds;
-        _metadata = metadata;
-        Directory.CreateDirectory(directory);
-    }
+    public ChunkedArrowWriter(string directory, double chunkSeconds, IReadOnlyDictionary<string, string> metadata) =>
+        _writer = new ChunkedStreamWriter(directory, "lidar", chunkSeconds, index => BuildSchema(metadata, index));
 
     public void Write(PointBatch b)
     {
         if (b.Count == 0) return;
-        if (_writer is null || _schema is null || _age.Elapsed.TotalSeconds >= _chunkSeconds) Rotate();
-
         int n = b.Count;
-        var batch = new RecordBatch(_schema!, new IArrowArray[]
+        _writer.Write(schema => new RecordBatch(schema, new IArrowArray[]
         {
-            new TimestampArray(TimeType, Buf(b.TimeNs, n), ArrowBuffer.Empty, n, 0, 0),
-            new UInt16Array(Buf(b.Azimuth, n), ArrowBuffer.Empty, n, 0, 0),
-            new Int8Array(Buf(b.Elevation, n), ArrowBuffer.Empty, n, 0, 0),
-            new UInt16Array(Buf(b.Distance, n), ArrowBuffer.Empty, n, 0, 0),
-            new UInt8Array(Buf(b.Reflectivity, n), ArrowBuffer.Empty, n, 0, 0),
-        }, n);
-
-        _writer!.WriteRecordBatch(batch);
-        _file!.Flush(true);
+            new TimestampArray(TimeType, ChunkedStreamWriter.Buffer(b.TimeNs, n), ArrowBuffer.Empty, n, 0, 0),
+            new UInt16Array(ChunkedStreamWriter.Buffer(b.Azimuth, n), ArrowBuffer.Empty, n, 0, 0),
+            new Int8Array(ChunkedStreamWriter.Buffer(b.Elevation, n), ArrowBuffer.Empty, n, 0, 0),
+            new UInt16Array(ChunkedStreamWriter.Buffer(b.Distance, n), ArrowBuffer.Empty, n, 0, 0),
+            new UInt8Array(ChunkedStreamWriter.Buffer(b.Reflectivity, n), ArrowBuffer.Empty, n, 0, 0),
+        }, n));
     }
 
-    public void Close()
-    {
-        if (_writer is null) return;
-        _writer.WriteEnd();
-        _writer.Dispose();
-        _file!.Flush(true);
-        _closedBytes += _file.Length;
-        _file.Dispose();
-        _writer = null;
-        _file = null;
-    }
+    public void Close() => _writer.Close();
+    public void Dispose() => _writer.Dispose();
 
-    public void Dispose() => Close();
-
-    private void Rotate()
-    {
-        Close();
-        ChunkIndex++;
-        string path = Path.Combine(_directory, $"lidar_{ChunkIndex:D4}.arrow");
-        _file = new FileStream(path, FileMode.CreateNew, FileAccess.Write, FileShare.Read, 1 << 20);
-        _writer = new ArrowStreamWriter(_file, _schema = BuildSchema(ChunkIndex), leaveOpen: true);
-        _age.Restart();
-    }
-
-    private static readonly TimestampType TimeType = new(TimeUnit.Nanosecond, "UTC");
-
-    private Schema BuildSchema(int chunkIndex)
+    private static Schema BuildSchema(IReadOnlyDictionary<string, string> metadata, int chunkIndex)
     {
         var sb = new Schema.Builder()
             .Field(new Field("time", TimeType, false))
@@ -87,12 +43,9 @@ internal sealed class ChunkedArrowWriter : IDisposable
             .Field(new Field("distance", UInt16Type.Default, false))
             .Field(new Field("reflectivity", UInt8Type.Default, false));
 
-        foreach (var (k, v) in _metadata) sb.Metadata(k, v);
+        foreach (var (k, v) in metadata) sb.Metadata(k, v);
         sb.Metadata("chunk_index", chunkIndex.ToString());
         sb.Metadata("chunk_created_utc", DateTime.UtcNow.ToString("O"));
         return sb.Build();
     }
-
-    private static ArrowBuffer Buf<T>(T[] a, int n) where T : unmanaged =>
-        new(MemoryMarshal.AsBytes(a.AsSpan(0, n)).ToArray());
 }
