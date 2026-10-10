@@ -116,7 +116,7 @@ The motor sits on a slotted 3D-printed mount that slides on the extrusion, so th
 
 == Index sensor
 
-A light barrier detects the passage of a flag on the lidar shaft once per revolution. It sits after the belt on the lidar shaft, so skipped belt teeth appear as a changed step count per revolution. The sensor edge occurs when the lidar is $93 degree$ (8266 steps) before vertical in the scan direction.
+A light barrier detects the passage of a flag on the lidar shaft once per revolution. It sits after the belt on the lidar shaft, so skipped belt teeth appear as a changed step count per revolution. The sensor edge occurs when the lidar is $90.3 degree$ (8027 steps) before vertical in the scan direction. (The value was 93° until 2026-10-10. A scan of a flat floor showed that the zero position was 2.7° off, a roll about the shaft axis, so the offset was corrected.)
 
 == Electronics
 
@@ -217,6 +217,7 @@ The firmware does not log anything itself. The PC records the USB stream, and se
 )
 
 After every upload the BNO085 may stay silent until the USB cable is unplugged and replugged (see the known issue in the wiring section). The firmware reports this on the USB stream as a text message.
+With the Arduino command line tool: `arduino-cli compile --fqbn teensy:avr:teensy41 firmware/lidar_ctrl` and `arduino-cli upload -p COM4 --fqbn teensy:avr:teensy41 firmware/lidar_ctrl`. The serial port must not be open in another program (serial monitor, CaveScan) during the upload. The sketch `firmware/bno_calibration` is a helper for calibrating the IMU (see the reconstruction chapter), not a scan firmware.
 
 === Design rules
 
@@ -297,7 +298,7 @@ The constants at the top of the sketch are the only values that need to be chang
   stroke: 0.5pt + gray,
   [*Constant*], [*Value*], [*Meaning*],
   [`STEPS_PER_REV`], [31999], [Steps per lidar revolution (measured, total ratio 10 : 1 with 3200 steps per motor revolution).],
-  [`VERTICAL_AFTER_EDGE_DEG`], [93.0°], [Angle between the index edge and the vertical lidar position (measured).],
+  [`VERTICAL_AFTER_EDGE_DEG`], [90.3°], [Angle between the index edge and the vertical lidar position (corrected from 93.0° on 2026-10-10 using the floor of a scan).],
   [`HOME_STEPS_PER_S`], [3000], [Search speed during homing and the speed used for approaching and stopping at 0°.],
   [`RAMP_STEPS_PER_S2`], [8000], [Acceleration and deceleration of the step rate.],
   [`MIN_START_STEPS_PER_S`], [400], [Lowest step rate used when starting from rest.],
@@ -337,9 +338,9 @@ The speed is open loop: the driver is told how many steps to make, and there is 
 
 The step counter `axisSteps` counts the steps since the last index edge. The light barrier on pin 5 triggers an interrupt on the falling edge, and in that interrupt the counter is read and set back to zero. The two operations are done with interrupts disabled so that no step can be lost in between. The re-zeroing every turn means that an error from slipping belt teeth or lost motor steps can never add up over more than one revolution.
 
-The edge occurs when the lidar is 93° before the vertical position. The angle of the lidar for a given counter value is therefore
+The edge occurs when the lidar is 90.3° before the vertical position. The angle of the lidar for a given counter value is therefore
 
-$ theta = (frac(n dot 360 degree, 31999) - 93 degree) mod 360 degree $
+$ theta = (frac(n dot 360 degree, 31999) - 90.3 degree) mod 360 degree $
 
 and is taken as a positive value. $theta = 0 degree$ is vertical. This is the same formula that is given to the receiving software in the data stream.
 
@@ -371,7 +372,7 @@ The clock is not synchronised to real time after the first pulse. It runs on the
 
 == IMU <sec:imu>
 
-The BNO085 is read over I2C at 400 kHz. Three reports are enabled, each at 100 Hz:
+The BNO085 is read over I2C at 400 kHz. Four reports are enabled, each at 100 Hz:
 
 #table(
   columns: (auto, 1fr),
@@ -380,9 +381,16 @@ The BNO085 is read over I2C at 400 kHz. Three reports are enabled, each at 100 H
   [Rotation vector], [Orientation quaternion, referenced to magnetic north (the magnetometer is used), with an accuracy estimate.],
   [Linear acceleration], [Acceleration in the sensor frame with gravity removed, in m/s#super[2].],
   [Calibrated magnetic field], [Magnetic field in the sensor frame, in µT, with a calibration status.],
+  [Calibrated gyroscope], [Angular velocity in the sensor frame, in rad/s, with a calibration status.],
 )
 
-One data packet is sent per rotation-vector report. The most recent linear acceleration and magnetic field values are attached to it. They are not interpolated, so they can be up to one report interval (10 ms) older than the quaternion.
+The tilt of the rig (rotation about the horizontal axes) is known accurately from gravity: the direction of "up" in the sensor frame is `R(q)^T z` of the rotation vector, and it scattered by only 0.02° in a stationary recording. The rotation about the vertical axis is only known from the magnetometer, which is badly disturbed near the motor and the lidar. The reconstruction therefore integrates the gyroscope (vertical rate = angular velocity projected on "up") for the relative heading and uses the magnetic heading only as a weak prior.
+
+*Known issue:* when the game rotation vector is enabled in addition, the normal rotation vector stops arriving (0 reports in 5 s, while all other reports keep their 100 Hz). The firmware therefore does not enable it (tested 2026-10-10).
+
+While streaming, the firmware sends a text message every 5 s with the number of reports received per type (about 500 each expected), which shows a stalled report.
+
+One data packet is sent per rotation-vector report. The most recent linear acceleration, magnetic field, angular velocity and game rotation vector values are attached to it. They are not interpolated, so they can be up to one report interval (10 ms) older than the quaternion.
 
 The time stamp of a packet is taken in the main loop when the report has been read from the sensor, not at the moment the sensor measured. It therefore includes the delay of the sensor's internal processing and of the I2C transfer. This delay has not been measured yet.
 
@@ -419,14 +427,14 @@ Sent at the start of the stream (with the first NMEA sentence, 100 ms after the 
   columns: (auto, auto, auto, 1fr),
   stroke: 0.5pt + gray,
   [*Offset*], [*Type*], [*Field*], [*Meaning*],
-  [0], [u8], [version], [Protocol version, currently 1.],
+  [0], [u8], [version], [Protocol version, currently 2. Version 1 had no gyroscope; the decoder still reads it.],
   [1], [f32], [steps_per_rev], [Steps per lidar revolution (31999).],
-  [5], [f32], [vertical_after_edge_deg], [Angle from index edge to vertical (93.0).],
+  [5], [f32], [vertical_after_edge_deg], [Angle from index edge to vertical (90.3; 93.0 in recordings made before 2026-10-10).],
   [9], [f32], [rpm], [Configured speed.],
   [13], [u32], [first_pulse_unix_s], [UTC label of the first PPS pulse.],
 )
 
-=== `S` sample packet (57 bytes, 100 per second)
+=== `S` sample packet (70 bytes, 100 per second)
 
 #table(
   columns: (auto, auto, auto, 1fr),
@@ -441,7 +449,11 @@ Sent at the start of the stream (with the first NMEA sentence, 100 ms after the 
   [43], [3 $times$ f32], [mx, my, mz], [Magnetic field in µT.],
   [55], [u8], [flags], [Bit 0: the shaft has seen an index edge, so `axis_steps` is valid. Bit 1: the shaft is in the running mode.],
   [56], [u8], [drops], [Number of packets dropped because USB was full, wrapping.],
+  [57], [3 $times$ f32], [gx, gy, gz], [Angular velocity in rad/s, sensor frame (calibrated gyroscope). Version 2.],
+  [69], [u8], [cal2], [Bits 0 and 1: calibration status of the gyroscope (0 to 3), other bits 0. Version 2.],
 )
+
+The first 57 bytes are the same in protocol version 1.
 
 The lidar angle follows from `axis_steps` with the formula in the section on shaft angle and index sensor. A value that is not a number (NaN) in the acceleration or magnetic field means that the IMU has not yet delivered that report.
 
@@ -527,7 +539,7 @@ The console program has two helper commands: `inspect <folder>` prints a summary
 
 `TeensyLink` keeps the serial port open and decodes the binary stream (packet format in @sec:usb). Packets with a wrong CRC are dropped, and impossible type and length combinations are rejected at once, so a stray marker byte does not stall the decoder. The firmware only streams after a `C` command; between scans only text messages arrive. While a scan is running, a `TeensyRecording` saves the stream into the scan folder:
 
-- `rig_0001.arrow`, ... : one row per sample (100 per second): `time` (absolute, ns), `axis_steps`, quaternion, `q_acc`, `cal`, linear acceleration, magnetic field, `flags`, `drops`.
+- `rig_0001.arrow`, ... : one row per sample (100 per second): `time` (absolute, ns), `axis_steps`, quaternion, `q_acc`, `cal`, linear acceleration, magnetic field, `flags`, `drops`, and since protocol version 2 the angular velocity `gx`, `gy`, `gz` and its status `cal2` (older recordings do not have these columns; the schema metadata says `cave_lidar.rig/2` for the new format).
 - `edges_0001.arrow`, ... : one row per index edge: `time`, `steps_before_reset`.
 - `rig_messages.log`: all text messages and headers with the PC time of arrival.
 
@@ -554,7 +566,7 @@ Keys: `s` starts a scan, `x` stops it (a second `x` ends the recording at once),
 + The lidar recording starts, with the Teensy clock as time reference.
 + On stop the rig runs down to 0° (about 10 to 20 s) while both recordings continue, then the lidar and rig recordings are closed and `scan.json` is written.
 
-*Live display:* state and elapsed time; for the rig the sample rate, USB drops, CRC errors, index edges, shaft state and angle, IMU quaternion with accuracy and calibration, and the last message; for the lidar the status page (PPS, motor, laser), packets and points per second, lost and dropped packets, clock jumps, the time check against the rig clock and the current file; free disk space with the remaining recording time at the current data rate; and the last messages.
+*Live display:* state and elapsed time; for the rig the sample rate, USB drops, CRC errors, index edges, shaft state and angle, IMU quaternion with heading accuracy, calibration status of the magnetometer, rotation vector and gyroscope, field strength and angular rate, and the last message; for the lidar the status page (PPS, motor, laser), packets and points per second, lost and dropped packets, clock jumps, the time check against the rig clock and the current file; free disk space with the remaining recording time at the current data rate; and the last messages.
 
 *Files of a scan folder:* `lidar_NNNN.arrow`, `rig_NNNN.arrow`, `edges_NNNN.arrow`, `rig_messages.log`, `orchestrator.log` (all events) and `scan.json` (project, scan, start and end time, rpm, label, software version, and the final counters of lidar and rig).
 
@@ -568,9 +580,56 @@ An unattended scan of 30 s plus the run-down (total 51 s, `--auto 30`) recorded 
 
 = Reconstruction and viewing software
 
-This part of the software is being rewritten and is not documented yet.
+The reconstruction software is the Julia package `CaveLidarRecon` in the folder `reconstruction/`. It works offline on the Arrow files of a scan folder.
 
-#todo[Coordinate frames, calibration of the lidar-to-IMU transform, fusion of IMU orientation with the shaft angle, point cloud reconstruction pipeline, viewer.]
+== Untangling the rotation (stage 1)
+
+`julia --project=reconstruction reconstruction/scripts/untangle.jl <scan folder> [--world | --no-attitude]` (a project folder with several `scan_NN` folders works too) reads all `lidar_*`, `rig_*` and `edges_*` files of a scan and writes one combined `untangled.arrow` into the scan folder. Columns: `time` (ns since 1970, UTC, as in the recordings), `x`, `y`, `z` (m, float32) and `reflectivity`. The lidar chunks are processed one after the other. The schema metadata records the parameters, the frame and the software version.
+
+For every point:
++ The shaft angle at the firing time is interpolated on the circle (shortest arc) from the rig samples: $theta = 2 pi n / N - "offset"$, with $N$ the step count of the revolution the sample belongs to. The index edges are exact nodes of the track. The offset from the index edge to vertical is taken from the rig file metadata (`vertical_after_edge_deg`, 90.3° since 2026-10-10); recordings without it were made with 93.0° and are processed with that value. Points closer than 0.5 m (the rig itself) and points inside a rig dropout longer than 50 ms are dropped.
++ The point is rotated by the mount (tilt $tau$ = 15.96°, yaw $psi$ = 89.855°), shifted by the optical centre (y = −1.11 mm, z = −0.48 mm) and rotated about the shaft axis X by $sigma theta$ with $sigma = -1$. The mount values were fitted with the plane thickness of a stationary scan (7.3 mm → 5.9 mm RMS).
++ The attitude of the BNO085 (rotation vector) is interpolated (slerp) between the two samples around the firing time. The BNO sits on the frame, not on the shaft, so it measures the attitude of the whole rig. Only rotations are applied, the origin stays at the rig. The BNO axes relative to the rig frame are taken from the drawing: z is the rig Z axis, y is the rig X axis (so x is the rig −Y axis). `bno_latency_ns` (default 0) shifts the attitude in time if the IMU stamp turns out to be late.
+
+The third step has three modes:
+
+#table(
+  columns: (auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*Mode*], [*Result*],
+  [default (gravity)], [The direction of "up" in the rig frame is taken from the quaternion, and the point is rotated by the smallest rotation that takes it onto +Z. Only the tilt is corrected; the heading about the vertical stays the rig's own (no magnetometer). Afterwards only a rotation about z is missing to align the cloud with the real world. If the rig turns about the vertical during a scan, that yaw is time dependent and is still in the cloud (the gyroscope is meant to supply it, see below).],
+  [`--world`], [The full BNO attitude rotates the point into East-North-Up. The heading comes from the magnetometer, which is unreliable on this rig (see below).],
+  [`--no-attitude`], [The points stay in the rig frame: X along the shaft, Z vertical at shaft angle 0.],
+)
+
+Verification: with the attitude switched off (and offset 93°) the output equals the earlier experiment script `deskew_03.jl` point for point (8 071 530 points, largest difference 0). In gravity mode the z coordinate of every point equals its z in world mode (largest difference 0 m on a scan of 7.5 million points), and the heading difference between the two modes is a constant rotation about z. `reconstruction/test/runtests.jl` contains a synthetic scan with a rotating frame and a known result, tests of the quaternion and rotation code, the mount calibration and the offset lookup.
+
+== Checking the level with the floor
+
+The tilt of the whole cloud can be checked on the floor. The check used so far (a script outside the package, to be added): take every 7th point of the cloud, find the most populated 2 cm height slab below the rig (more than 0.3 m away), fit a plane to the points within 15 cm of it (normal = direction of smallest spread), then repeat ten times with all points within 2 cm of the current plane. The floor tilt is the angle between the plane normal and the z axis. On the scans of 2026-10-10 the plane had 55 000 to 70 000 inliers out to 6.9 m, 6 mm residual, and lay 64.5 to 64.9 cm below the scanner origin (as measured), so it is the floor. Near and far points gave the same tilt.
+
+#table(
+  columns: (auto, auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*Scan, setting*], [*Floor tilt*], [*Remark*],
+  [`scan_02`, 93° offset, BNO mount flat], [3.45°], [normal (−0.022, −0.056)],
+  [`scan_02`, 90.3°], [1.37°], [normal (−0.022, −0.009)],
+  [`scan_02`, 89.8°], [1.28°], [roll about the shaft removed completely],
+  [`scan_02`, 95.7° (wrong direction)], [6.0°], [],
+  [`offset_90_3/scan_01`, firmware 90.3°], [1.25°], [normal (−0.020, −0.010); 89.8° gives 1.13°],
+)
+
+The floor of the first scans was tilted by about 2.7° about the shaft axis. The cause was the offset from the index edge to vertical: the 93° was 2.7° too large (measured on the rig, and confirmed by the floor). The firmware constant `VERTICAL_AFTER_EDGE_DEG` is now 90.3° (the data suggest 89.8°, not yet changed). After the correction a tilt of about 1.1 to 1.3° remains in the x component of the normal (rotation about the Y axis). It does not depend on the offset and was the same before the rig was turned square to the walls. Possible causes: the BNO mounting, the tilt of the lidar mount, the floor itself.
+
+== BNO085 mounting, calibration and magnetic heading
+
+*Tilt.* The BNO mounting rotation relative to the rig frame (`bno_from_frame` in `RigParams`) is nominal (see above). A tilt of 5.6° (the BNO vertical against the rig Z axis) was fitted from a level pose with `reconstruction/scripts/calibrate_bno_mount.jl` (option `--tilt-only`, from gravity alone; the up direction scattered by 0.02° during the recording) and stored in `reconstruction/calibration/bno_mount.toml`. The file is loaded automatically when it exists. It was set aside as `bno_mount.toml.disabled` after the offset error was found, because the mounting is assumed flat; renaming it back restores the calibration. With the corrected offset and the flat mounting the floor is level within 1.1 to 1.3°, so there is no evidence for a BNO mounting tilt. Why the BNO vertical was about 5° from the rig Z axis in the calibration pose, although the surface was assumed level, is not explained.
+
+*Heading.* The magnetometer is badly disturbed near the stepper motor (a compass deflects within 10 cm) and probably by the lidar. In scans the field strength was 60 to 73 µT (earth: about 45 to 50 µT in central Europe), the calibration status of the magnetometer was 0 and once 1 of 3, and in a recording on the calibrated rig it flickered between 0 and 2 with a reported heading accuracy of 28°. The field changes by less than 0.4 µT with the shaft angle, so the disturbance is fixed to the rig and can in principle be calibrated out (figure-8 movements with everything powered). A full fit of the heading offset gave −26° and was not used, because it is mostly magnetic error. The heading is therefore only a weak prior for north. The reconstruction is meant to use the gyroscope for the relative heading.
+
+*Calibration helper sketch.* `firmware/bno_calibration/bno_calibration.ino` (Teensy 4.1) runs the BNO085 with dynamic calibration of accelerometer, gyroscope and magnetometer switched on and prints the state twice a second on the USB serial port: calibration status of all sensors, heading accuracy, field strength, the compass heading of the BNO y axis (the rig X axis) and the tilt. It stores the calibration in the BNO flash after the magnetometer has been at 3/3 for 10 s, or on the command `s`; `C` erases it. The motor driver pins are set as in `lidar_ctrl`. After calibrating, flash `lidar_ctrl` again.
+
+#todo[Check whether the stored BNO calibration survives a power cycle (the status dropped to 0/3 at rest after a figure-8). Source of the 1.1 to 1.3° pitch residual. Decide between 90.3° and 89.8°. Put the floor check into the package as a script. Stage 2: gyroscope integration for the relative heading, translation and registration. Viewer.]
 
 = Appendix
 
@@ -583,4 +642,7 @@ This part of the software is being rewritten and is not documented yet.
   [2026-10-04], [Index sensor, step calibration (10:1) and vertical offset (93°) measured.],
   [2026-10-08], [Repository restructured. Wiring and control software chapters written for the final firmware `lidar_ctrl`.],
   [2026-10-09], [Lidar IP changed to 192.168.3.201 (separate /24 subnet, second Ethernet adapter on the PC). Lidar recorder written (Arrow stream files), tested on the rig. Lidar time: sub-second from the PPS-locked lidar, whole seconds from a rough reference. Teensy recorder and orchestrator CaveScan (CLI with live display) written and tested on the rig.],
+  [2026-10-10], [Offset from the index edge to vertical corrected from 93.0° to 90.3° (the floor of a scan was tilted by 2.7° about the shaft axis). The reconstruction takes the value from the rig file metadata (`vertical_after_edge_deg`); recordings without it are processed with 93.0°. The recorder now waits for the stream header before it writes the first rig chunk, so the metadata is always there.],
+  [2026-10-10], [Firmware protocol version 2: calibrated gyroscope added to the sample packet and the rig Arrow files (the game rotation vector was tried and dropped: it stalls the normal rotation vector). BNO calibration helper sketch `bno_calibration`; tilt of the BNO mounting calibrated (5.6°).],
+  [2026-10-10], [Reconstruction package `CaveLidarRecon`: untangling of the shaft rotation plus BNO085 frame attitude, combined Arrow output.],
 )
