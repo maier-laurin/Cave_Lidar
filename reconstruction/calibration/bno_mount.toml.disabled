@@ -1,0 +1,18 @@
+# BNO085 mounting: rotation from rig-frame to BNO-sensor coordinates (rows). Written by scripts/calibrate_bno_mount.jl
+written = "2026-10-10T14:52:57.992"
+matrix = [[-3.0238096807833055e-5, -0.9952203636790643, -0.09765463022390945], [0.9999998087004037, 3.0238096807833055e-5, -0.000617806453078764], [0.000617806453078764, -0.09765463022390945, 0.995220172379468]]
+
+[info]
+source = "C:\\Users\\Laurin.SIGMA\\Documents\\Personal\\exploration_and_expeditions\\Cave_Mapping_and_Exploration\\Equipment\\Cave_Lidar\\data\\scans\\bno_mount_cal\\scan_01"
+up_scatter_deg = 0.02448158827239827
+cal_rot = 2
+scatter_deg = 0.4269933529631818
+q_acc_deg = 28.27
+cal_mag = 0
+north_axis = "+X"
+mode = "tilt only"
+field_uT = 38.220883525894585
+tilt_vs_nominal_deg = 5.6042420836427445
+samples = 4706
+heading_full_fit_deg = -26.276602335367883
+heading_vs_nominal_deg = -0.00174083588951001
