@@ -21,8 +21,12 @@
 //   'S' sample   (100 Hz, one per BNO rotation-vector report): u64 t_us (unix us), i32 axis_steps,
 //                f32 qw,qx,qy,qz, u16 q_acc (0.01 deg), u8 cal (bits0-1 rotation vector, bits2-3 magnetometer),
 //                f32 lax,lay,laz (m/s^2, gravity removed), f32 mx,my,mz (uT), u8 flags (bit0 homed, bit1 running),
-//                u8 drops (wrapping count of packets dropped because USB was full)
-//   'E' edge     (once per index-sensor edge): u64 t_us, i32 steps_before_reset (~steps_per_rev if no slip;
+//                u8 drops (wrapping count of packets dropped because USB was full),
+//                protocol version 2 appends: f32 gx,gy,gz (rad/s, calibrated gyroscope, sensor frame),
+//                u8 cal2 (bits0-1 gyroscope status, bits2-7 reserved, 0).
+//                The values of the other reports are the latest delivered ones, up to one report interval (10 ms) old.
+//                The first 57 bytes are identical in version 1.
+//   'E' edge    (once per index-sensor edge): u64 t_us, i32 steps_before_reset (~steps_per_rev if no slip;
 //                meaningless for the first edge after a start)
 //   'M' message  (human readable text)
 //   axis angle [deg] = fmod(axis_steps * 360 / steps_per_rev - vertical_after_edge_deg, 360), made positive
@@ -37,7 +41,8 @@ const int PIN_SENS = 5;            // light barrier, one pulse per lidar-shaft r
 const int SENS_EDGE = FALLING;     // always use the SAME edge
 
 const float STEPS_PER_REV     = 31999.0;   // measured: total ratio 10:1 (3200 steps per motor rev)
-const float VERTICAL_AFTER_EDGE_DEG = 93.0;  // measured: lidar is vertical 93 deg after the sensor edge
+const float VERTICAL_AFTER_EDGE_DEG = 90.3;  // lidar is vertical 90.3 deg after the sensor edge (was 93.0 until 2026-10-10:
+                                             // the floor of a scan showed the 0 deg position was 2.7 deg off, roll about the shaft)
 const float HOME_STEPS_PER_S = 3000.0;    // search speed until the first edge, also used for stopping
 const float RAMP_STEPS_PER_S2 = 8000.0;
 const float MIN_START_STEPS_PER_S = 400.0; // timer period is only updated after the current one ends
@@ -101,6 +106,9 @@ bool imuSilentReported = false;
 float la[3]  = {NAN, NAN, NAN};        // linear acceleration, sensor frame (gravity removed)
 float mag[3] = {NAN, NAN, NAN};        // calibrated magnetic field, uT
 uint8_t magCal = 0;
+float gyro[3] = {NAN, NAN, NAN};       // calibrated angular velocity, rad/s, sensor frame
+uint8_t gyroCal = 0;
+uint32_t evRv = 0, evGyro = 0, evMag = 0, evLa = 0;   // reports received, for the 5 s statistics message
 
 // ---------------------------------------------------------------- binary output
 
@@ -109,6 +117,7 @@ struct PktH { uint8_t version; float stepsPerRev; float verticalDeg; float rpm; 
 struct PktS {
   uint64_t t_us; int32_t steps; float q[4]; uint16_t qAcc; uint8_t cal;
   float la[3]; float mag[3]; uint8_t flags; uint8_t drops;
+  float gyro[3]; uint8_t cal2;                       // protocol version 2
 };
 struct PktE { uint64_t t_us; int32_t stepsBefore; };
 #pragma pack(pop)
@@ -198,7 +207,7 @@ void ppsISR() {
 }
 
 void sendHeader() {
-  PktH h = {1, STEPS_PER_REV, VERTICAL_AFTER_EDGE_DEG, cfgRpm, firstLabelUnix};
+  PktH h = {2, STEPS_PER_REV, VERTICAL_AFTER_EDGE_DEG, cfgRpm, firstLabelUnix};
   sendPacket('H', &h, sizeof h);
 }
 
@@ -406,6 +415,9 @@ void setReports() {
   bno.enableReport(SH2_ROTATION_VECTOR, REPORT_US);          // north referenced (uses the magnetometer)
   bno.enableReport(SH2_LINEAR_ACCELERATION, REPORT_US);
   bno.enableReport(SH2_MAGNETIC_FIELD_CALIBRATED, REPORT_US);
+  bno.enableReport(SH2_GYROSCOPE_CALIBRATED, REPORT_US);       // angular velocity
+  // Do NOT also enable SH2_GAME_ROTATION_VECTOR: with it the normal rotation vector stopped arriving (0 reports
+  // in 5 s while all other reports kept their 100 Hz), tested 2026-10-10.
 }
 
 bool startImu() {
@@ -431,9 +443,20 @@ void handleRotationAndStream() {
   s.cal = (sv.status & 0x03) | (magCal << 2);
   memcpy(s.la, la, sizeof la);
   memcpy(s.mag, mag, sizeof mag);
+  memcpy(s.gyro, gyro, sizeof gyro);
+  s.cal2 = gyroCal & 0x03;
   s.flags = (edgeEver ? 1 : 0) | (mode == RUNNING ? 2 : 0);
   s.drops = dropCount;
   sendPacket('S', &s, sizeof s);
+}
+
+// every 5 s while streaming: how many reports of each kind the BNO delivered (500 each expected at 100 Hz)
+void reportImuStats() {
+  static uint32_t lastMs = 0, pRv = 0, pGyro = 0, pMag = 0, pLa = 0;
+  if (!streaming() || millis() - lastMs < 5000) return;
+  lastMs = millis();
+  msg("IMU reports in 5 s: rotation %lu gyro %lu mag %lu linacc %lu", evRv - pRv, evGyro - pGyro, evMag - pMag, evLa - pLa);
+  pRv = evRv; pGyro = evGyro; pMag = evMag; pLa = evLa;
 }
 
 void pollImu() {
@@ -453,17 +476,27 @@ void pollImu() {
     imuSilentReported = false;
     switch (sv.sensorId) {
       case SH2_LINEAR_ACCELERATION:
+        evLa++;
         la[0] = sv.un.linearAcceleration.x;
         la[1] = sv.un.linearAcceleration.y;
         la[2] = sv.un.linearAcceleration.z;
         break;
       case SH2_MAGNETIC_FIELD_CALIBRATED:
+        evMag++;
         mag[0] = sv.un.magneticField.x;
         mag[1] = sv.un.magneticField.y;
         mag[2] = sv.un.magneticField.z;
         magCal = sv.status & 0x03;
         break;
+      case SH2_GYROSCOPE_CALIBRATED:
+        evGyro++;
+        gyro[0] = sv.un.gyroscope.x;
+        gyro[1] = sv.un.gyroscope.y;
+        gyro[2] = sv.un.gyroscope.z;
+        gyroCal = sv.status & 0x03;
+        break;
       case SH2_ROTATION_VECTOR:
+        evRv++;
         handleRotationAndStream();
         break;
     }
@@ -502,4 +535,5 @@ void loop() {
   servicePendingStart();
   servicePps();
   pollImu();
+  reportImuStats();
 }

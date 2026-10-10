@@ -34,6 +34,9 @@ public sealed class Dashboard
         Console.Write(sb.ToString());
     }
 
+    // BNO085 calibration status 0..3
+    private static string CalWord(int status) => status switch { 0 => "unreliable", 1 => "low", 2 => "medium", _ => "high" };
+
     private List<string> Build()
     {
         var o = _o.Options;
@@ -65,7 +68,9 @@ public sealed class Dashboard
             string axis = s.IndexSeen ? $"{s.AxisSteps} steps" + (rig.Header is { } h && h.StepsPerRev > 0 ? $" = {s.AxisSteps / h.StepsPerRev * 360:F1} deg after the index edge" : "") : "no index edge seen yet";
             L.Add($" stream {rig.SampleRateHz,5:F1} Hz   samples {rig.Samples}   usb drops {rig.UsbDrops}   crc errors {rig.CrcErrors}   index edges {rig.Edges}");
             L.Add($" shaft: {(s.Running ? "running" : "holding")}, {axis}");
-            L.Add($" IMU q = [{s.Qw:F3} {s.Qx:F3} {s.Qy:F3} {s.Qz:F3}]  accuracy {s.QAcc / 100.0:F1} deg  cal rot {s.CalRotation}/3 mag {s.CalMagnet}/3");
+            L.Add($" IMU q = [{s.Qw:F3} {s.Qx:F3} {s.Qy:F3} {s.Qz:F3}]  heading accuracy {s.QAcc / 100.0:F1} deg");
+            L.Add($" magnetometer: calibration {s.CalMagnet}/3 ({CalWord(s.CalMagnet)})   rotation vector {s.CalRotation}/3 ({CalWord(s.CalRotation)})   |B| {Math.Sqrt(s.Mx * s.Mx + s.My * s.My + s.Mz * s.Mz):F1} uT");
+            L.Add($" gyro: calibration {s.CalGyro}/3 ({CalWord(s.CalGyro)})   |w| {Math.Sqrt(s.Gx * s.Gx + s.Gy * s.Gy + s.Gz * s.Gz) * 180 / Math.PI:F2} deg/s");
             L.Add($" rig time {DateTimeOffset.FromUnixTimeMilliseconds(s.TimeUs / 1000):HH:mm:ss.fff} (simulated UTC)");
         }
         else
@@ -73,7 +78,7 @@ public sealed class Dashboard
             L.Add(rig.Samples > 0
                 ? $" NO DATA from the rig for {rig.SecondsSinceSample:F0} s"
                 : " no stream yet (the rig only streams after a scan was started)");
-            L.Add(""); L.Add(""); L.Add("");
+            L.Add(""); L.Add(""); L.Add(""); L.Add(""); L.Add("");
         }
         L.Add($" last message: {rig.LastMessage}");
         L.Add("");

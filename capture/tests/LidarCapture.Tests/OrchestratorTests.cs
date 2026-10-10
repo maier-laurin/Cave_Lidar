@@ -9,9 +9,9 @@ namespace LidarCapture.Tests;
 
 public class TeensyParserTests
 {
-    internal static byte[] SamplePacket(long timeUs, int steps = 1000, byte drops = 0, byte flags = 3)
+    internal static byte[] SamplePacket(long timeUs, int steps = 1000, byte drops = 0, byte flags = 3, bool v2 = false)
     {
-        var p = new byte[57];
+        var p = new byte[v2 ? 70 : 57];
         BinaryPrimitives.WriteUInt64LittleEndian(p, (ulong)timeUs);
         BinaryPrimitives.WriteInt32LittleEndian(p.AsSpan(8), steps);
         BinaryPrimitives.WriteSingleLittleEndian(p.AsSpan(12), 1.0f);   // qw
@@ -22,7 +22,30 @@ public class TeensyParserTests
         BinaryPrimitives.WriteSingleLittleEndian(p.AsSpan(43), 42.0f);  // mx
         p[55] = flags;
         p[56] = drops;
+        if (v2)
+        {
+            BinaryPrimitives.WriteSingleLittleEndian(p.AsSpan(57), 0.125f);  // gx
+            BinaryPrimitives.WriteSingleLittleEndian(p.AsSpan(65), -0.5f);   // gz
+            p[69] = 0b10;                                                    // cal2: gyroscope status 2
+        }
         return TeensyPacketParser.Encode('S', p);
+    }
+
+    [Fact]
+    public void DecodesTheVersion2FieldsAndKeepsReadingVersion1()
+    {
+        var samples = new List<TeensySample>();
+        var parser = new TeensyPacketParser { OnSample = samples.Add };
+        parser.Feed(SamplePacket(1000, v2: false));
+        parser.Feed(SamplePacket(2000, v2: true));
+        Assert.Equal(2, samples.Count);
+        Assert.True(float.IsNaN(samples[0].Gx) && samples[0].Cal2 == 0);   // version 1: not delivered
+        Assert.Equal(1.0f, samples[0].Qw);                                                                  // the first 57 bytes are unchanged
+        Assert.Equal(0.125f, samples[1].Gx);
+        Assert.Equal(-0.5f, samples[1].Gz);
+        Assert.Equal(2, samples[1].CalGyro);
+        Assert.Equal(0.25f, samples[1].Qx);
+        Assert.Equal(0, parser.CrcErrors);
     }
 
     [Fact]
@@ -139,6 +162,37 @@ public class ProjectStoreTests
 public class TeensyRecordingTests
 {
     [Fact]
+    public async Task FirstChunkCarriesTheHeaderValuesEvenWhenTheFirstSampleComesLate()
+    {
+        string dir = Path.Combine(Path.GetTempPath(), "rig_" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            var recording = new TeensyRecording(dir, 60);
+            var add = typeof(TeensyRecording).GetMethod("Add", BindingFlags.NonPublic | BindingFlags.Instance, new[] { typeof(TeensySample) })!;
+            var addHeader = typeof(TeensyRecording).GetMethod("Add", BindingFlags.NonPublic | BindingFlags.Instance, new[] { typeof(TeensyHeader) })!;
+            await Task.Delay(1300);   // the first sample arrives more than 1 s after the recording was created (first PPS pulse)
+            void Sample(int i)
+            {
+                TeensySample? s = null;
+                new TeensyPacketParser { OnSample = x => s = x }.Feed(TeensyParserTests.SamplePacket(1_760_000_000_000_000 + i * 10_000, i, v2: true));
+                add.Invoke(recording, new object[] { s!.Value });
+            }
+            Sample(0);                                                  // the header follows the first samples
+            await Task.Delay(50);
+            addHeader.Invoke(recording, new object[] { new TeensyHeader(2, 31999f, 90.3f, 6f, 1_760_000_001u) });
+            for (int i = 1; i < 30; i++) Sample(i);
+            recording.Dispose();
+
+            using var fs = File.OpenRead(Path.Combine(dir, "rig_0001.arrow"));
+            using var reader = new ArrowStreamReader(fs);
+            await reader.ReadNextRecordBatchAsync();
+            Assert.Equal("90.3", reader.Schema.Metadata["vertical_after_edge_deg"]);
+            Assert.Equal("2", reader.Schema.Metadata["firmware_protocol_version"]);
+        }
+        finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }
+    }
+
+    [Fact]
     public async Task WritesSamplesToAnArrowStream()
     {
         string dir = Path.Combine(Path.GetTempPath(), "rig_" + Guid.NewGuid().ToString("N"));
@@ -149,7 +203,7 @@ public class TeensyRecordingTests
             for (int i = 0; i < 120; i++)
             {
                 TeensySample? s = null;
-                new TeensyPacketParser { OnSample = x => s = x }.Feed(TeensyParserTests.SamplePacket(1_760_000_000_000_000 + i * 10_000, i));
+                new TeensyPacketParser { OnSample = x => s = x }.Feed(TeensyParserTests.SamplePacket(1_760_000_000_000_000 + i * 10_000, i, v2: true));
                 add.Invoke(recording, new object[] { s!.Value });
             }
             recording.Dispose();
@@ -169,6 +223,9 @@ public class TeensyRecordingTests
             Assert.Equal(1_760_000_000_000_000 * 1000L, firstTime);
             Assert.Equal(119, lastSteps);
             Assert.Equal("unit_test", reader.Schema.Metadata["project"]);
+            Assert.Equal("cave_lidar.rig/2", reader.Schema.Metadata["format"]);
+            Assert.NotNull(reader.Schema.GetFieldByName("gx"));
+            Assert.NotNull(reader.Schema.GetFieldByName("cal2"));
             Assert.Equal(120, recording.SamplesWritten);
         }
         finally { if (Directory.Exists(dir)) Directory.Delete(dir, true); }

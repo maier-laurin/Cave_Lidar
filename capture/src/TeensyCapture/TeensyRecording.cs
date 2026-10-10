@@ -80,7 +80,10 @@ public sealed class TeensyRecording : IDisposable
                         break;
                     case PcMessage m: _log.WriteLine($"{m.Utc:O} {m.Text}"); break;
                 }
-                if (samples.Count >= SampleBatch || lastFlush.Elapsed.TotalSeconds >= 1) FlushSamples();
+                // The first chunk takes its schema metadata (steps per rev, offset to vertical, ...) from the stream header,
+                // which arrives about 10 samples after the first one. The time trigger would flush a single sample before
+                // that (the recording is created more than 1 s before the first sample), so it waits for the header.
+                if (samples.Count >= SampleBatch || (lastFlush.Elapsed.TotalSeconds >= 1 && _header is not null)) FlushSamples();
             }
         }
         FlushSamples();
@@ -95,6 +98,8 @@ public sealed class TeensyRecording : IDisposable
         var lax = new float[n]; var lay = new float[n]; var laz = new float[n];
         var mx = new float[n]; var my = new float[n]; var mz = new float[n];
         var flags = new byte[n]; var drops = new byte[n];
+        var gx = new float[n]; var gy = new float[n]; var gz = new float[n];
+        var cal2 = new byte[n];
 
         for (int i = 0; i < n; i++)
         {
@@ -105,6 +110,8 @@ public sealed class TeensyRecording : IDisposable
             lax[i] = s.Lax; lay[i] = s.Lay; laz[i] = s.Laz;
             mx[i] = s.Mx; my[i] = s.My; mz[i] = s.Mz;
             flags[i] = s.Flags; drops[i] = s.Drops;
+            gx[i] = s.Gx; gy[i] = s.Gy; gz[i] = s.Gz;
+            cal2[i] = s.Cal2;
         }
 
         static ArrowBuffer B<T>(T[] a, int n) where T : unmanaged => ChunkedStreamWriter.Buffer(a, n);
@@ -120,6 +127,8 @@ public sealed class TeensyRecording : IDisposable
             new FloatArray(B(mx, n), ArrowBuffer.Empty, n, 0, 0), new FloatArray(B(my, n), ArrowBuffer.Empty, n, 0, 0), new FloatArray(B(mz, n), ArrowBuffer.Empty, n, 0, 0),
             new UInt8Array(B(flags, n), ArrowBuffer.Empty, n, 0, 0),
             new UInt8Array(B(drops, n), ArrowBuffer.Empty, n, 0, 0),
+            new FloatArray(B(gx, n), ArrowBuffer.Empty, n, 0, 0), new FloatArray(B(gy, n), ArrowBuffer.Empty, n, 0, 0), new FloatArray(B(gz, n), ArrowBuffer.Empty, n, 0, 0),
+            new UInt8Array(B(cal2, n), ArrowBuffer.Empty, n, 0, 0),
         }, n));
     }
 
@@ -139,8 +148,8 @@ public sealed class TeensyRecording : IDisposable
     {
         var m = new Dictionary<string, string>
         {
-            ["format"] = $"cave_lidar.{kind}/1",
-            ["sensor"] = "Teensy 4.0 + BNO085 + step counter",
+            ["format"] = kind == "rig" ? "cave_lidar.rig/2" : $"cave_lidar.{kind}/1",   // rig/2: gyroscope appended
+            ["sensor"] = "Teensy 4.1 + BNO085 + step counter",
             ["time_unit"] = "ns since 1970-01-01T00:00:00 UTC (simulated UTC of the rig, the clock the lidar is locked to)",
             ["columns"] = columns,
             ["chunk_index"] = chunk.ToString(),
@@ -170,8 +179,10 @@ public sealed class TeensyRecording : IDisposable
             .Field(new Field("lax", FloatType.Default, false)).Field(new Field("lay", FloatType.Default, false)).Field(new Field("laz", FloatType.Default, false))
             .Field(new Field("mx", FloatType.Default, false)).Field(new Field("my", FloatType.Default, false)).Field(new Field("mz", FloatType.Default, false))
             .Field(new Field("flags", UInt8Type.Default, false))
-            .Field(new Field("drops", UInt8Type.Default, false));
-        foreach (var (k, v) in Metadata(chunk, "rig", "axis_steps: steps since the last index edge; q*: IMU orientation (real part first); q_acc: 0.01 deg; cal: bits 0-1 rotation vector, bits 2-3 magnetometer calibration; la*: linear acceleration m/s^2 (NaN = not yet delivered); m*: magnetic field uT; flags: bit0 index edge seen, bit1 running; drops: wrapping counter of packets the Teensy dropped"))
+            .Field(new Field("drops", UInt8Type.Default, false))
+            .Field(new Field("gx", FloatType.Default, false)).Field(new Field("gy", FloatType.Default, false)).Field(new Field("gz", FloatType.Default, false))
+            .Field(new Field("cal2", UInt8Type.Default, false));
+        foreach (var (k, v) in Metadata(chunk, "rig", "axis_steps: steps since the last index edge; q*: IMU orientation (real part first); q_acc: 0.01 deg; cal: bits 0-1 rotation vector, bits 2-3 magnetometer calibration; la*: linear acceleration m/s^2 (NaN = not yet delivered); m*: magnetic field uT; flags: bit0 index edge seen, bit1 running; drops: wrapping counter of packets the Teensy dropped; g*: calibrated gyroscope angular velocity rad/s, sensor frame (NaN = not delivered, e.g. firmware protocol 1); cal2: bits 0-1 gyroscope calibration status. The values of the other reports are the latest delivered ones, up to 10 ms old"))
             sb.Metadata(k, v);
         return sb.Build();
     }

@@ -7,12 +7,15 @@ public readonly record struct TeensySample(
     long TimeUs, int AxisSteps,
     float Qw, float Qx, float Qy, float Qz, ushort QAcc, byte Cal,
     float Lax, float Lay, float Laz, float Mx, float My, float Mz,
-    byte Flags, byte Drops)
+    byte Flags, byte Drops,
+    // protocol version 2; NaN / 0 when the firmware is version 1
+    float Gx = float.NaN, float Gy = float.NaN, float Gz = float.NaN, byte Cal2 = 0)
 {
     public bool IndexSeen => (Flags & 1) != 0;
     public bool Running => (Flags & 2) != 0;
     public int CalRotation => Cal & 3;
     public int CalMagnet => (Cal >> 2) & 3;
+    public int CalGyro => Cal2 & 3;
 }
 
 /// <summary>Index edge ('E' packet), once per revolution.</summary>
@@ -27,7 +30,8 @@ public readonly record struct TeensyHeader(byte Version, float StepsPerRev, floa
 /// </summary>
 public sealed class TeensyPacketParser
 {
-    public const int SampleLength = 57, EdgeLength = 12, HeaderLength = 17;
+    /// <summary>Sample payload of protocol version 1 (57 bytes) and 2 (70 bytes: adds the gyroscope and cal2).</summary>
+    public const int SampleLengthV1 = 57, SampleLength = 70, EdgeLength = 12, HeaderLength = 17;
 
     public Action<TeensySample>? OnSample { get; set; }
     public Action<TeensyEdge>? OnEdge { get; set; }
@@ -85,7 +89,7 @@ public sealed class TeensyPacketParser
 
     private static bool PlausibleLength(byte type, int len) => (char)type switch
     {
-        'S' => len == SampleLength,
+        'S' => len == SampleLength || len == SampleLengthV1,
         'E' => len == EdgeLength,
         'H' => len == HeaderLength,
         'M' => len <= 119,
@@ -96,15 +100,20 @@ public sealed class TeensyPacketParser
     {
         switch ((char)type)
         {
-            case 'S' when p.Length == SampleLength:
+            case 'S' when p.Length == SampleLength || p.Length == SampleLengthV1:
+            {
+                bool v2 = p.Length == SampleLength;
                 OnSample?.Invoke(new TeensySample(
                     (long)BinaryPrimitives.ReadUInt64LittleEndian(p),
                     BinaryPrimitives.ReadInt32LittleEndian(p[8..]),
                     F(p, 12), F(p, 16), F(p, 20), F(p, 24),
                     BinaryPrimitives.ReadUInt16LittleEndian(p[28..]), p[30],
                     F(p, 31), F(p, 35), F(p, 39), F(p, 43), F(p, 47), F(p, 51),
-                    p[55], p[56]));
+                    p[55], p[56],
+                    v2 ? F(p, 57) : float.NaN, v2 ? F(p, 61) : float.NaN, v2 ? F(p, 65) : float.NaN,
+                    v2 ? p[69] : (byte)0));
                 return true;
+            }
             case 'E' when p.Length == EdgeLength:
                 OnEdge?.Invoke(new TeensyEdge((long)BinaryPrimitives.ReadUInt64LittleEndian(p), BinaryPrimitives.ReadInt32LittleEndian(p[8..])));
                 return true;
