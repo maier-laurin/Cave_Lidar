@@ -1,0 +1,184 @@
+<title>__TITLE__</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<script src="https://cdnjs.cloudflare.com/ajax/libs/plotly.js/2.35.0/plotly.min.js"></script>
+<style>
+  /* Layout: one tall 3D view of the fitted path (optionally with the room's points), a control row above it,
+     and two small time charts below. */
+  :root {
+    --bg: #f4f6f7;
+    --surface: #ffffff;
+    --fg: #14232b;
+    --muted: #5d6e77;
+    --grid: #d9e0e3;
+    --accent: #0b6e8a;
+    --seed: #9aa7ad;
+    --path: #14232b;
+    --cmp1: #c4572b;
+    --cmp2: #7a5cc8;
+    --font: "IBM Plex Sans", system-ui, -apple-system, "Segoe UI", sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, "SFMono-Regular", Consolas, monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #0f1a20; --surface: #16252d; --fg: #e4edf0; --muted: #8fa3ad; --grid: #2a3d47;
+      --accent: #4cc3e3; --seed: #6c7f88; --path: #f2f7f9; --cmp1: #f08a5d; --cmp2: #a99be6; color-scheme: dark;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #0f1a20; --surface: #16252d; --fg: #e4edf0; --muted: #8fa3ad; --grid: #2a3d47;
+    --accent: #4cc3e3; --seed: #6c7f88; --path: #f2f7f9; --cmp1: #f08a5d; --cmp2: #a99be6; color-scheme: dark;
+  }
+  body { background: var(--bg); color: var(--fg); font-family: var(--font); padding-inline: 16px; padding-block: 20px 32px; }
+  main { max-width: 1200px; margin-inline: auto; display: flex; flex-direction: column; gap: 16px; }
+  header { display: flex; flex-direction: column; gap: 4px; }
+  h1 { font-size: 1.4rem; font-weight: 600; margin: 0; text-wrap: balance; }
+  .sub { color: var(--muted); font-size: 0.9rem; max-width: 70ch; line-height: 1.45; margin: 0; }
+  .stats { display: flex; flex-wrap: wrap; gap: 8px 24px; font-family: var(--mono); font-size: 0.8rem; color: var(--muted); }
+  .stats b { color: var(--fg); font-weight: 500; font-variant-numeric: tabular-nums; }
+  .controls { display: flex; flex-wrap: wrap; gap: 12px 20px; align-items: center; background: var(--surface); border: 1px solid var(--grid); border-radius: 6px; padding: 10px 14px; }
+  .controls label { display: flex; align-items: center; gap: 6px; font-size: 0.85rem; }
+  .range { display: flex; align-items: center; gap: 8px; flex: 1 1 320px; min-width: 0; font-size: 0.85rem; }
+  .range input[type=range] { flex: 1 1 80px; min-width: 0; accent-color: var(--accent); }
+  .range output { font-family: var(--mono); font-size: 0.8rem; min-width: 4.5ch; font-variant-numeric: tabular-nums; }
+  .views { display: flex; gap: 6px; }
+  button { font: inherit; font-size: 0.85rem; color: var(--fg); background: var(--bg); border: 1px solid var(--grid); border-radius: 4px; padding: 5px 10px; cursor: pointer; }
+  button:hover { border-color: var(--accent); }
+  :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+  .plot { background: var(--surface); border: 1px solid var(--grid); border-radius: 6px; min-width: 0; }
+  #p3d { height: clamp(380px, 64vh, 720px); }
+  .small { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(100%, 420px), 1fr)); gap: 16px; }
+  .small .plot { height: 240px; }
+  .note { color: var(--muted); font-size: 0.8rem; line-height: 1.5; max-width: 80ch; margin: 0; }
+</style>
+
+<main>
+  <header>
+    <h1>__TITLE__</h1>
+    <p class="sub">Fitted path of the rig, one pose every 0.1 s, starting where the rig stood still. Other fits are drawn as thin lines for comparison. When point clouds are included, grey is the still map and the coloured points are the moving part placed with the path; doubled or smeared surfaces show where the path is wrong.</p>
+    <div class="stats" id="stats"></div>
+  </header>
+
+  <section class="controls" aria-label="View controls">
+    <div class="range"><span>From</span><input id="t0" type="range" min="0" max="1" step="0.5" value="0" aria-label="Show moving points from"><output id="t0o"></output></div>
+    <div class="range"><span>To</span><input id="t1" type="range" min="0" max="1" step="0.5" value="1" aria-label="Show moving points until"><output id="t1o"></output></div>
+    <label><input id="showSeed" type="checkbox" checked> Still map</label>
+    <label><input id="showMove" type="checkbox" checked> Moving points</label>
+    <label><input id="showPath" type="checkbox" checked> Path</label>
+    <label><input id="showCmp" type="checkbox" checked> Other fits</label>
+    <div class="views">
+      <button id="vTop" type="button">Top</button>
+      <button id="vSide" type="button">Side</button>
+      <button id="vReset" type="button">Reset</button>
+    </div>
+  </section>
+
+  <div id="p3d" class="plot" role="img" aria-label="3D view of the fitted path"></div>
+
+  <div class="small">
+    <div id="pYaw" class="plot" role="img" aria-label="Yaw of the rig over time"></div>
+    <div id="pFit" class="plot" role="img" aria-label="Fit residual and matched points per fit step"></div>
+  </div>
+
+  <p class="note">Positions are in metres in the frame of the rig at the start (z up, heading as the rig's own). The IMU alone is not shown, it drifts to tens of metres. The fit charts show the value of the fit step that covers each time.</p>
+</main>
+
+<script>
+const D = __DATA__;
+if (typeof Plotly === "undefined") { document.getElementById("p3d").textContent = "plotly.js could not be loaded (no internet or blocked). Open the page with internet access."; throw new Error("plotly missing"); }
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+const el = id => document.getElementById(id);
+const P = D.path, S = D.seed, M = D.move;
+const hasPts = M.t.length > 0, hasCmp = D.cmp.length > 0;
+const pathT0 = P.t[0] - 0.1, pathT1 = P.t[P.t.length - 1];
+
+const med = a => { const s = [...a].filter(Number.isFinite).sort((x, y) => x - y); return s[Math.floor(s.length / 2)]; };
+const ext = a => [Math.min(...a), Math.max(...a)];
+const fmt = (a, d = 2) => ext(a).map(v => v.toFixed(d)).join(" to ");
+el("stats").innerHTML =
+  `<span>scan <b>${D.scan}</b></span><span>path <b>${D.main}</b></span><span>moving <b>${pathT0.toFixed(0)} to ${pathT1.toFixed(0)} s</b></span>` +
+  `<span>x <b>${fmt(P.x)} m</b></span><span>y <b>${fmt(P.y)} m</b></span><span>z <b>${fmt(P.z)} m</b></span>` +
+  `<span>median fit error <b>${(med(P.rms) * 100).toFixed(1)} cm</b></span>`;
+
+if (!hasPts) for (const id of ["t0", "t1", "showSeed", "showMove"]) { const e = el(id); (e.closest(".range") || e.closest("label")).hidden = true; }
+if (!hasCmp) el("showCmp").closest("label").hidden = true;
+for (const id of ["t0", "t1"]) { const r = el(id); r.min = Math.floor(pathT0); r.max = Math.ceil(pathT1); }
+el("t0").value = Math.floor(pathT0); el("t1").value = Math.ceil(pathT1);
+
+function layoutColors() {
+  const fg = css("--fg"), grid = css("--grid"), surf = css("--surface");
+  return { fg, grid, surf };
+}
+function axis3d(title, c) {
+  return { title: { text: title, font: { color: c.fg, size: 11 } }, color: c.fg, gridcolor: c.grid, zerolinecolor: c.grid,
+           backgroundcolor: c.surf, showbackground: true, tickfont: { color: c.fg, size: 10 } };
+}
+const cmpColors = () => [css("--cmp1"), css("--cmp2")];
+function traces3d() {
+  const lo = +el("t0").value, hi = +el("t1").value;
+  const idx = []; for (let i = 0; i < M.t.length; i++) if (M.t[i] >= lo && M.t[i] <= hi) idx.push(i);
+  const pick = a => idx.map(i => a[i]);
+  const mtime = pick(M.t);
+  const cbar = { title: { text: "time [s]", font: { color: css("--fg"), size: 11 } }, tickfont: { color: css("--fg"), size: 10 }, thickness: 10, len: 0.5, x: 1.0 };
+  return [
+    { type: "scatter3d", mode: "markers", name: "still map", x: S.x, y: S.y, z: S.z, visible: hasPts && el("showSeed").checked,
+      marker: { size: 1.6, color: css("--seed"), opacity: 0.45 }, hoverinfo: "skip", showlegend: false },
+    { type: "scatter3d", mode: "markers", name: "moving points", x: pick(M.x), y: pick(M.y), z: pick(M.z), visible: hasPts && el("showMove").checked,
+      marker: { size: 1.8, color: mtime, colorscale: "Viridis", cmin: pathT0, cmax: pathT1, opacity: 0.7, colorbar: cbar },
+      text: mtime.map(t => t.toFixed(1) + " s"), hovertemplate: "%{text}<extra></extra>", showlegend: false },
+    { type: "scatter3d", mode: "lines+markers", name: D.main, x: P.x, y: P.y, z: P.z, visible: el("showPath").checked,
+      line: { width: 5, color: css("--path") },
+      marker: { size: 2.5, color: P.t, colorscale: "Viridis", cmin: pathT0, cmax: pathT1, line: { color: css("--path"), width: 1 }, colorbar: hasPts ? undefined : cbar },
+      text: P.t.map((t, i) => `t ${t.toFixed(1)} s, yaw ${P.yaw[i].toFixed(0)} deg`), hovertemplate: "%{text}<extra>path</extra>" },
+    ...D.cmp.map((c, k) => ({ type: "scatter3d", mode: "lines", name: c.name, x: c.path.x, y: c.path.y, z: c.path.z, visible: el("showCmp").checked,
+      line: { width: 3, color: cmpColors()[k % 2], dash: k % 2 ? "dot" : "solid" }, hovertemplate: c.name + " %{x:.2f}, %{y:.2f}, %{z:.2f}<extra></extra>" })),
+    { type: "scatter3d", mode: "markers+text", name: "start", x: [0], y: [0], z: [0], text: ["start"], textposition: "top center", showlegend: false,
+      textfont: { color: css("--fg"), size: 11 }, marker: { size: 6, symbol: "diamond", color: css("--accent") }, hoverinfo: "skip", visible: el("showPath").checked },
+  ];
+}
+const cams = {
+  reset: { eye: { x: 1.6, y: -1.6, z: 1.0 }, up: { x: 0, y: 0, z: 1 } },
+  top: { eye: { x: 0, y: 0.001, z: 2.6 }, up: { x: 0, y: 1, z: 0 } },
+  side: { eye: { x: 0, y: -2.6, z: 0.15 }, up: { x: 0, y: 0, z: 1 } },
+};
+function layout3d() {
+  const c = layoutColors();
+  return { paper_bgcolor: c.surf, margin: { l: 0, r: 0, t: 0, b: 0 }, showlegend: hasCmp,
+    legend: { x: 0.01, y: 0.99, font: { color: c.fg, size: 11 }, bgcolor: "rgba(0,0,0,0)" }, font: { color: c.fg },
+    scene: { aspectmode: "data", xaxis: axis3d("x [m]", c), yaxis: axis3d("y [m]", c), zaxis: axis3d("z [m]", c), bgcolor: c.surf, camera: cams.reset } };
+}
+function chartLayout(title, yTitle) {
+  const c = layoutColors();
+  return { paper_bgcolor: c.surf, plot_bgcolor: c.surf, margin: { l: 52, r: 52, t: 30, b: 36 }, font: { color: c.fg, size: 11 }, showlegend: false,
+    title: { text: title, font: { size: 12, color: c.fg }, x: 0.02 },
+    xaxis: { title: "time [s]", gridcolor: c.grid, zerolinecolor: c.grid, color: c.fg },
+    yaxis: { title: yTitle, gridcolor: c.grid, zerolinecolor: c.grid, color: c.fg } };
+}
+function drawSmall() {
+  const c = layoutColors();
+  const yaw = chartLayout("Yaw of the rig", "yaw [deg]");
+  Plotly.react("pYaw", [{ x: P.t, y: P.yaw, mode: "lines", line: { color: css("--accent"), width: 2 },
+                           hovertemplate: "%{x:.1f} s, %{y:.1f} deg<extra></extra>" }], yaw, { displayModeBar: false, responsive: true });
+  const fit = chartLayout("Fit per step", "point-to-plane error [cm]");
+  fit.yaxis2 = { title: "matched points", overlaying: "y", side: "right", color: c.fg, showgrid: false, rangemode: "tozero" };
+  Plotly.react("pFit", [
+    { x: P.t, y: P.rms.map(v => v * 100), mode: "lines", line: { color: css("--accent"), width: 2, shape: "hv" },
+      name: "error", hovertemplate: "%{x:.1f} s, %{y:.1f} cm<extra></extra>" },
+    { x: P.t, y: P.n, yaxis: "y2", mode: "lines", line: { color: css("--muted"), width: 1.5, dash: "dot", shape: "hv" }, name: "matched",
+      hovertemplate: "%{x:.1f} s, %{y} matched<extra></extra>" }], fit, { displayModeBar: false, responsive: true });
+}
+function draw3d(keepCamera) {
+  const lay = layout3d();
+  if (keepCamera) { const g = el("p3d")._fullLayout; if (g && g.scene) lay.scene.camera = g.scene.camera; }
+  Plotly.react("p3d", traces3d(), lay, { responsive: true, displaylogo: false });
+}
+function drawAll() { draw3d(true); drawSmall(); }
+function updateOutputs() { el("t0o").textContent = el("t0").value + " s"; el("t1o").textContent = el("t1").value + " s"; }
+
+for (const id of ["t0", "t1", "showSeed", "showMove", "showPath", "showCmp"]) el(id).addEventListener("input", () => { updateOutputs(); draw3d(true); });
+const setCam = k => Plotly.relayout("p3d", { "scene.camera": cams[k] });
+el("vTop").onclick = () => setCam("top"); el("vSide").onclick = () => setCam("side"); el("vReset").onclick = () => setCam("reset");
+matchMedia("(prefers-color-scheme: dark)").addEventListener("change", drawAll);
+new MutationObserver(drawAll).observe(document.documentElement, { attributes: true, attributeFilter: ["data-theme"] });
+updateOutputs(); draw3d(false); drawSmall();
+</script>

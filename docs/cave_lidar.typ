@@ -631,6 +631,60 @@ The floor of the first scans was tilted by about 2.7° about the shaft axis. The
 
 #todo[Check whether the stored BNO calibration survives a power cycle (the status dropped to 0/3 at rest after a figure-8). Source of the 1.1 to 1.3° pitch residual. Decide between 90.3° and 89.8°. Put the floor check into the package as a script. Stage 2: gyroscope integration for the relative heading, translation and registration. Viewer.]
 
+== Path estimation while moving (stage 2) <sec:odometry>
+
+Untangling assumes that the rig stands still. This stage estimates the path of the rig while it is carried, so that the points of a moving scan can be put into one frame. Only four degrees of freedom are estimated: the position x, y, z and the yaw about the vertical. Roll and pitch come from the BNO085 gravity direction (see above) and are taken as exact. The frame is the rig frame at the start (z up, heading as the rig's own), the origin is the lidar at the start. Code: `reconstruction/src/` (`trajectory.jl`, `imu.jl`, `registration.jl`, `spline_odometry.jl`, `simulate.jl`) and `reconstruction/scripts/` (`simulate_path.jl`, `odometry.jl`, `spline_odometry.jl`, `plot_path.jl`).
+
+*Principle.* The path is the IMU path plus a correction that is fitted to the lidar points: `p(t) = p_imu(t) + c(t)`. The IMU supplies the fast detail (strides, turns), the lidar supplies the slow drift. The BNO085 linear acceleration is integrated twice only over a short time, because over the whole recording it drifts to 100 m (bias, gravity leakage from a small tilt error, yaw error). The yaw rate of the gyroscope is good: the integrated yaw stayed within about 1° of the lidar-fitted yaw.
+
+*Input.* The untangled points (`untangled.arrow`, gravity mode) and the rig files. `imu_track` turns the BNO linear acceleration and gyroscope into the same levelled rig frame as the points (rotation of the sensor into the rig frame, then the smallest rotation that takes up onto +Z, the same as for the lidar points). The recording must start with the rig standing still: the first seconds (`seed_s`, 31.5 s in the test scan) become the first map, and the IMU biases are the mean of the IMU at standstill.
+
+*Map and loss.* The map is a voxel map (5 cm, one centroid per voxel) of all points placed so far, with a KD-tree. Each new point is matched to a local plane (the 8 nearest map centroids, all within 0.4 m, planar if the smallest eigenvalue is below 0.2 of the middle one) and gives a point-to-plane residual with Huber weighting (0.1 m), noise 3 cm. The solver is a hand-written Gauss-Newton with the correspondences found again in each iteration. The new points are fitted only against older points; they enter the map after the fit.
+
+*Version 1: one correction per window* (`run_odometry`, `scripts/odometry.jl`). Windows of 1 s. Per window four unknowns: the displacement `dp` over the window (3) and a yaw offset `dpsi`, growing linearly over the window (a constant velocity and yaw rate offset), with a Gaussian prior around the IMU prediction (10 cm, 2°). The start pose of a window is the end pose of the previous one, and the velocity offset stays in the state for all later windows. The correction is continuous in position but has a velocity step at every window boundary. Windows of 0.5 s gave a path differing by 6 cm median, windows of 2 s failed (134 cm median difference).
+
+*Version 2: cubic B-spline correction* (`run_spline_odometry`, `scripts/spline_odometry.jl`, the version to use). The correction `c(t) = (x, y, z, yaw)` is a uniform cubic B-spline with control points every `knot_s` (0.1 s or 0.2 s, one or two lidar head rotations), so a control point acts over four knot intervals only and the correction has continuous acceleration. The fit goes step by step: each step adds `step_s` of new points and the matching new control points, and keeps only these and the last `refine_knots` older control points free; everything older is frozen. The points enter the map only when all their control points are frozen. New control points start as the linear continuation of the previous ones (the velocity correction carries on). A smoothness prior on the second difference of the control points (the acceleration of the correction, 1 m/s#super[2] for the position and 0.3 rad/s#super[2] for the yaw) replaces the prior of version 1.
+
+*Thinning.* The fit points are thinned to one per 20 cm voxel in the sensor frame and per 0.1 s slice (one lidar sweep). Thinning per voxel only, as in version 1, keeps just the earliest sweep of a window and leaves the rest unused; slicing raised the number of matched points per fit from about 260 to over 3000.
+
+*Moving person.* A person who carries the rig moves with it. Two measures: the fit uses only points at least 1.5 m from the lidar (`fit_min_range`), and every map voxel logs the number of different 0.1 s segments (`segment_s`) that put points into it; only voxels hit in at least 3 segments (`min_segments`) are matched. A wall is hit again and again, a person who walks with the rig crosses a 5 cm voxel in about 0.2 s. A person who stands still counts as static.
+
+#table(
+  columns: (auto, 1fr),
+  stroke: 0.5pt + gray,
+  [*Setting*], [*Default, meaning*],
+  [`knot_s`], [0.2 s (tested 0.1 s and 0.2 s with the same result); spacing of the control points],
+  [`step_s`, `refine_knots`], [0.4 s and 4 (0.2 s and 8 for 0.1 s knots); new data per step, older control points that stay free],
+  [`sigma_acc`, `sigma_yaw_acc`], [1.0 m/s#super[2], 0.3 rad/s#super[2]; smoothness. 0.3 and 1.0 work, 3.0 diverged (path of 140 m): there is no safeguard against a failed step yet],
+  [`map_voxel`, `fit_voxel`, `slice_s`], [5 cm, 20 cm, 0.1 s],
+  [`fit_min_range`, `min_segments`, `segment_s`], [1.5 m, 3, 0.1 s in the scripts (the library defaults are 0 and 1, which switches the person filter off)],
+)
+
+*Synthetic test* (`scripts/simulate_path.jl`). The standstill scan `offset_90_3` was moved along a known path (8 s standstill, then about 2 m with stride bounce and a yaw swing of about 30°) and an IMU with noise and bias was simulated for it. The path was recovered with a median point error of 0.9 cm against 28 cm for the IMU alone (about 3 s run time for 7.8 M points). Not modelled: occlusion and the changed sampling density at the new viewpoint, the lever arm, tilt, and the noise values are guesses.
+
+*Real moving scan* (`first_move/scan_01`, 20.3 M points, 6 rpm). The rig stands still until about 32 s, moves until about 80 s (yaw rate up to 40°/s, speed median 0.23 m/s, at most 0.46 m/s) and stands still again. Results of the spline version:
+
+#table(
+  columns: (auto, auto, auto, auto),
+  stroke: 0.5pt + gray,
+  [*Result*], [*Window (v1)*], [*Spline 0.2 s*], [*Spline 0.1 s*],
+  [Moving points (from 1.5 m) to the planes of the standstill map, median / 90 %], [2.1 / 8.7 cm], [1.1 / 6.6 cm], [1.1 / 6.6 cm],
+  [Fit error while moving (median, standstill: 1.4 cm)], [3.8 cm], [3.3 cm], [3.2 cm],
+  [Run time], [6 s], [39 s], [64 s],
+)
+
+The path stays inside x −1.6 to 1.6 m, y −0.5 to 1.2 m, z 0 to 1.4 m and ends within 2 cm and 0.3° of the start. The path acceleration is 0.4 m/s#super[2] median. The spline path differs from the window path by 5 cm median and 18 cm at most (1 s steps). The BNO linear acceleration alone drifts to 100 m. The person filter changed the path by less than a centimetre, so the person was not what spoiled the fit in this scan. Changing the other settings (number of free older knots, step size, sigma 0.3 to 1.0) changed the result by very little.
+
+*Viewing.* `scripts/plot_path.jl` writes `odometry_view.html`, a self-contained page (plotly.js from cdnjs) with the path in 3D, optional overlays of other paths, yaw and fit charts, and with `--points` the still map and the moving points coloured by time. `--main=NAME` reads `NAME_path.csv` (written every 0.1 s by the odometry scripts). The page was also published as an Artifact.
+
+*Limits.*
+- There is no ground truth. The room is small and the standstill map is visible all the time, so this is closer to localisation in a known room than to odometry without drift. The return to the start is therefore weak evidence. A cave passage that is new at every step will be harder.
+- The result still looks like a double exposure to the eye. Suspects, not yet tested: the dynamic tilt (the BNO attitude lags or errs while the rig moves, and the fit cannot correct roll and pitch), the lever arm of the BNO (about −27 cm in x, 19 cm in y, −4.5 cm in z from the optical centre, not compensated), the timing between the shaft angle and the points.
+- Along the axis of a uniform tunnel the geometry cannot determine the position; the result falls back to the IMU and the smoothness prior.
+- Julia pitfall met on the way: `4f+1` is read as a `Float32` literal; write `4*f+1`.
+
+#todo[Check the floor tilt over time with the spline path (dynamic tilt of the BNO). Compensate the BNO lever arm (`w` squared times `r` plus `alpha` times `r`). Safeguard for a failed fit step (fall back to the prior). Unit tests for `fit_window`, `fit_spline_step!` and `imu_track`. Test with a recording that leaves the standstill map (passage). Learn the biases online (`bias_gain`) on a longer scan. Global final pass over all control points. Measure how many points belong to the person. Decide voxel sizes (5 cm and 20 cm are untuned).]
+
 = Appendix
 
 == Change log
@@ -645,4 +699,5 @@ The floor of the first scans was tilted by about 2.7° about the shaft axis. The
   [2026-10-10], [Offset from the index edge to vertical corrected from 93.0° to 90.3° (the floor of a scan was tilted by 2.7° about the shaft axis). The reconstruction takes the value from the rig file metadata (`vertical_after_edge_deg`); recordings without it are processed with 93.0°. The recorder now waits for the stream header before it writes the first rig chunk, so the metadata is always there.],
   [2026-10-10], [Firmware protocol version 2: calibrated gyroscope added to the sample packet and the rig Arrow files (the game rotation vector was tried and dropped: it stalls the normal rotation vector). BNO calibration helper sketch `bno_calibration`; tilt of the BNO mounting calibrated (5.6°).],
   [2026-10-10], [Reconstruction package `CaveLidarRecon`: untangling of the shaft rotation plus BNO085 frame attitude, combined Arrow output.],
+  [2026-10-10], [Path estimation while moving (stage 2): IMU path plus lidar-fitted correction, first as one correction per 1 s window, then as a cubic B-spline (knots 0.1 or 0.2 s) with a person filter (fit points from 1.5 m, map voxels hit in 3 time segments). Tested on a synthetic path and on the first moving scan; viewer page `odometry_view.html`.],
 )
